@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.theyoungrossco.netgrip</id>
+  <name>NetGrip</name>
+  <summary>Drag-and-drop network interface management</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <description>
+    <p>
+      NetGrip shows your machine's network interfaces as boxes on a canvas:
+      every IP configuration, VLAN and bond is its own box, joined to its
+      interface by a line. Drag an IP configuration to another NIC to move
+      it, drag two NICs together to create a bond, right-click to add VLANs
+      or change bonding modes.
+    </p>
+    <p>
+      It manages the local machine or any remote Linux host reachable over
+      SSH, and always shows the exact iproute2 commands it will run before
+      applying anything.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.theyoungrossco.netgrip.desktop</launchable>
+  <url type="homepage">https://github.com/theyoungrossco/netgrip</url>
+  <url type="bugtracker">https://github.com/theyoungrossco/netgrip/issues</url>
+  <url type="vcs-browser">https://github.com/theyoungrossco/netgrip</url>
+  <categories>
+    <category>Network</category>
+    <category>System</category>
+  </categories>
+  <provides>
+    <binary>netgrip</binary>
+  </provides>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.0" date="2026-06-12">
+      <description>
+        <p>Initial release: canvas view, IP config move/clone by drag,
+        bonds and VLANs, SSH remote hosts, demo mode.</p>
+      </description>
+    </release>
+  </releases>
+</component>

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <!-- Flat squares and straight lines, like the app canvas itself. -->
+  <rect width="128" height="128" rx="14" fill="#2b3a4a"/>
+  <g stroke="#8a949e" stroke-width="3">
+    <line x1="38" y1="64" x2="74" y2="36"/>
+    <line x1="38" y1="64" x2="74" y2="92"/>
+  </g>
+  <rect x="14" y="48" width="32" height="32" fill="#e7eef5" stroke="#46729c" stroke-width="3"/>
+  <rect x="74" y="22" width="28" height="28" fill="#e0f0dc" stroke="#3f8a44" stroke-width="3"/>
+  <rect x="74" y="78" width="28" height="28" fill="#e9e2f6" stroke="#6d51a8" stroke-width="3"/>
+  <circle cx="41" cy="53" r="3.5" fill="#2e9e4f"/>
+</svg>

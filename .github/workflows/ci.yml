@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      # Core tests deliberately avoid PySide6, so CI stays fast and headless.
+      - run: pip install pytest ruff
+      - run: ruff check src tests
+      - run: pytest -q
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install build
+      - run: python -m build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  ui-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: sudo apt-get update && sudo apt-get install -y libegl1 libgl1
+      - run: pip install .
+      # Import the whole UI and bring up the main window offscreen.
+      - run: |
+          QT_QPA_PLATFORM=offscreen python - <<'EOF'
+          from PySide6.QtCore import QTimer
+          from PySide6.QtWidgets import QApplication
+          app = QApplication([])
+          from netgrip.ui.main_window import MainWindow
+          win = MainWindow(demo=True)
+          win.show()
+          QTimer.singleShot(500, app.quit)
+          raise SystemExit(app.exec())
+          EOF

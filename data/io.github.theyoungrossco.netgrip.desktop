@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=NetGrip
+GenericName=Network Interface Manager
+Comment=Drag-and-drop management of NICs, VLANs, bonds and IP configuration
+Exec=netgrip
+Icon=io.github.theyoungrossco.netgrip
+Terminal=false
+Categories=Network;System;Settings;
+Keywords=network;nic;interface;vlan;bond;bonding;lacp;ip;iproute2;
+StartupNotify=true
