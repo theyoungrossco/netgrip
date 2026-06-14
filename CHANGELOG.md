@@ -6,49 +6,40 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [0.1.0] - 2026-06-14
+
+First release.
+
 ### Added
 
-- One IP box per address (was one box per family), so a single address can be
-  dragged, cloned or detached on its own
+- Canvas view of the host's network: NICs, bonds, bridges and VLANs as boxes,
+  with one box per IPv4/IPv6 address joined to its interface by a line
+- Drag an address box between interfaces to move it; Ctrl-drag to clone it
+- Draft IP configs: detached address boxes that live on the canvas until
+  attached somewhere
+- Drag NIC onto NIC to create a bond; all kernel bonding modes including LACP
+  (802.3ad) and failover (active-backup); bond mode and membership changes
+- VLAN creation, deletion and re-parenting by drag
+- Link up/down toggling
 - Link **Properties** dialog: edit a NIC/bond/VLAN's MAC, MTU and alias, or
   rename the interface
 - **Default gateway** per interface, shown on the box and editable with a
   Dynamic/Static toggle (Dynamic leaves a DHCP-assigned gateway untouched)
-- **DNS servers** read from `/etc/resolv.conf` and shown as a dashed frame
-  around the whole diagram (DNS is system-wide); settable per-link via
-  `resolvectl` where systemd-resolved is present
+- **DNS servers** read from `/etc/resolv.conf` and drawn as a frame around the
+  whole diagram (DNS is system-wide); settable per-link via `resolvectl` where
+  systemd-resolved is present
 - Free-form **names** for IP-config boxes, shown as the box title
-- Interface **alias** (kernel `ifalias`) is read and shown on the box
+- Interface **alias** (kernel `ifalias`) read and shown on the box
+- **Light/dark theming** following the OS colour scheme, with a toolbar Theme
+  selector (System / Light / Dark) remembered across runs
 - Drafts, box positions and box names **persist to disk** (under
-  `~/.local/share/netgrip/`) and are restored on the next launch
-- **Light/dark theming** — the canvas and window follow the OS colour scheme,
-  with a toolbar Theme selector (System / Light / Dark) remembered across runs
-- `AGENTS.md` contributor/agent guide (imported by `CLAUDE.md`)
-
-### Changed
-
-- Dialogs report invalid input **inline** instead of opening a second dialog;
-  no stacked modal popups anywhere (project rule)
-- Canvas colours now come from a central `ui/theme.py` instead of hardcoded
-  light-mode values
-
-## [0.1.0] - 2026-06-12
-
-Initial release.
-
-### Added
-
-- Node-graph canvas: NICs, bonds, bridges and VLANs as boxes; IPv4 and IPv6
-  configurations as separate boxes joined by lines
-- Drag an IP config between interfaces to move it; Ctrl-drag to clone
-- Draft IP configs: detached boxes that live on the canvas until attached
-- Drag NIC onto NIC to create a bond; all kernel bonding modes including
-  LACP (802.3ad) and failover (active-backup)
-- VLAN creation, deletion and re-parenting by drag
-- Link up/down, bond membership and mode changes via context menus
-- Remote host management over SSH; host picker pre-filled from
+  `~/.local/share/netgrip/`), restored per host on the next launch
+- Remote host management over SSH, with the host picker pre-filled from
   `~/.ssh/config`
-- Confirmation dialog showing the exact iproute2 commands before any change
+- Confirmation dialog showing the exact iproute2 commands before any change;
+  invalid input is reported inline (no stacked dialogs)
 - Demo mode (`netgrip --demo`)
 
 [Unreleased]: https://github.com/theyoungrossco/netgrip/compare/v0.1.0...HEAD

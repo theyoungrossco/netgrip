@@ -34,10 +34,8 @@ NetGrip reads network state with `ip -json` and applies changes with plain
 commands** it is about to run and asks for confirmation — what you approve is
 what executes, locally via `sudo`/`pkexec` or remotely via `ssh`.
 
-> **Important:** NetGrip 0.1 manipulates the *running* network stack.
-> Changes are real and immediate, but they are **not persisted across
-> reboots** yet. Persistence backends (NetworkManager, systemd-networkd,
-> netplan) are on the [roadmap](ROADMAP.md).
+> **Important:** NetGrip manipulates the *running* network stack. Changes are
+> real and immediate, but they are **not yet persisted across reboots**.
 
 The canvas stays *flat* — boxes joined by straight lines — but follows your
 desktop's light or dark theme, with a toolbar **Theme** selector (System /
@@ -111,11 +109,10 @@ interfaces; setting the default gateway (with a Dynamic/Static toggle) and
 per-link DNS (via systemd-resolved); system-wide DNS read from
 `/etc/resolv.conf`; draft IP configs; light/dark theming; remembered box
 positions, names and drafts per host; remote hosts over SSH; demo mode. As
-noted above, all of this applies to the *running* stack only — reboot
-persistence is the headline of 0.2.
+noted above, all of this applies to the *running* stack only — it isn't yet
+persisted across reboots.
 
-See [ROADMAP.md](ROADMAP.md) for where this is going (persistence, more route
-control, bridges/teams, Windows hosts) and
+See [ROADMAP.md](ROADMAP.md) for what's planned next and
 [CHANGELOG.md](CHANGELOG.md) for history.
 
 ## Contributing
