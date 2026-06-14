@@ -20,13 +20,19 @@ from PySide6.QtWidgets import (
 
 import netgrip
 from netgrip.core import actions
-from netgrip.core.demo import demo_interfaces
+from netgrip.core.demo import DEMO_DNS, DEMO_DNS_SEARCH, demo_interfaces
 from netgrip.core.model import GROUP_KINDS, HostState, Interface
-from netgrip.core.probe import probe
+from netgrip.core.probe import probe, probe_dns
 from netgrip.core.runner import DemoRunner, LocalRunner, Runner, SSHRunner
 from netgrip.core.sshhosts import ssh_config_hosts
 from netgrip.ui.canvas import Canvas
-from netgrip.ui.dialogs import BondDialog, IpConfigDialog, VlanDialog, confirm_commands
+from netgrip.ui.dialogs import (
+    BondDialog,
+    IpConfigDialog,
+    LinkPropertiesDialog,
+    VlanDialog,
+    confirm_commands,
+)
 from netgrip.ui.items import GroupNode, IpNode, NicNode, VlanNode
 from netgrip.ui.worker import run_in_background
 
@@ -159,20 +165,31 @@ class MainWindow(QMainWindow):
             return
         runner = self.runner
         if isinstance(runner, DemoRunner):
-            self._set_state(demo_interfaces())
+            self._set_state(demo_interfaces(), DEMO_DNS, DEMO_DNS_SEARCH, can_edit_dns=False)
             return
         self._set_busy(True, f"Reading interfaces on {runner.label}…")
+
+        def work() -> tuple:
+            interfaces = probe(runner)
+            servers, search, can_edit = probe_dns(runner)
+            return interfaces, servers, search, can_edit
+
         run_in_background(
-            lambda: probe(runner),
-            on_done=lambda ifaces: (self._set_busy(False), self._set_state(ifaces)),
+            work,
+            on_done=lambda res: (self._set_busy(False), self._set_state(*res)),
             on_error=lambda msg: (self._set_busy(False), self._show_error(msg)),
         )
 
-    def _set_state(self, interfaces: list[Interface]) -> None:
-        self.state = HostState(self.runner.label, interfaces)
+    def _set_state(self, interfaces: list[Interface], dns: list[str] | None = None,
+                   dns_search: list[str] | None = None, can_edit_dns: bool = False) -> None:
+        self.state = HostState(
+            self.runner.label, interfaces,
+            list(dns or []), list(dns_search or []), can_edit_dns,
+        )
         self.canvas.populate(self.state, self.loopback_action.isChecked())
+        dns_note = f" · DNS {', '.join(self.state.dns)}" if self.state.dns else ""
         self.statusBar().showMessage(
-            f"{self.runner.label}: {len(interfaces)} interfaces"
+            f"{self.runner.label}: {len(interfaces)} interfaces{dns_note}"
         )
 
     def _set_busy(self, busy: bool, message: str | None = None) -> None:
@@ -217,18 +234,18 @@ class MainWindow(QMainWindow):
             draft_id = node.draft_id
             self._apply(
                 f"Attach IPv{node.family} config to {target_name}",
-                actions.plan_add_addresses(target_name, node.cidrs),
+                actions.plan_add_addresses(target_name, [node.cidr]),
                 on_success=lambda: self.canvas.remove_draft(draft_id),
             )
         elif clone:
             self._apply(
                 f"Clone IPv{node.family} config to {target_name}",
-                actions.plan_add_addresses(target_name, node.cidrs),
+                actions.plan_add_addresses(target_name, [node.cidr]),
             )
         else:
             self._apply(
                 f"Move IPv{node.family} config from {node.parent_name} to {target_name}",
-                actions.plan_move_addresses(node.parent_name, target_name, node.cidrs),
+                actions.plan_move_addresses(node.parent_name, target_name, [node.cidr]),
             )
 
     def _on_nic_dropped(self, node: NicNode, target) -> None:
@@ -288,6 +305,8 @@ class MainWindow(QMainWindow):
         )
         if iface.kind != "vlan":
             menu.addAction("Add VLAN…", partial(self._add_vlan_dialog, iface.name))
+        if iface.kind != "loopback":
+            menu.addAction("Properties…", partial(self._link_properties_dialog, iface))
         menu.addSeparator()
         if iface.is_up:
             menu.addAction(
@@ -372,14 +391,16 @@ class MainWindow(QMainWindow):
                     iface.name,
                     partial(self._attach_draft, node, iface.name),
                 )
-            menu.addAction("Edit addresses…", partial(self._edit_ip_dialog, node))
+            menu.addAction("Edit address…", partial(self._edit_ip_dialog, node))
+            menu.addAction("Set name…", partial(self._name_ip_dialog, node))
             menu.addSeparator()
             menu.addAction(
                 "Delete draft", partial(self.canvas.remove_draft, node.draft_id)
             )
             return
 
-        menu.addAction("Edit addresses…", partial(self._edit_ip_dialog, node))
+        menu.addAction("Edit address…", partial(self._edit_ip_dialog, node))
+        menu.addAction("Set name…", partial(self._name_ip_dialog, node))
         menu.addAction("Clone (as draft)", partial(self._clone_ip, node))
         move = menu.addMenu("Move to")
         for iface in self._attachable_ifaces(exclude=node.parent_name):
@@ -387,7 +408,7 @@ class MainWindow(QMainWindow):
                 iface.name,
                 partial(self._apply,
                         f"Move IPv{node.family} config to {iface.name}",
-                        actions.plan_move_addresses(node.parent_name, iface.name, node.cidrs)),
+                        actions.plan_move_addresses(node.parent_name, iface.name, [node.cidr])),
             )
         menu.addSeparator()
         menu.addAction(
@@ -395,10 +416,10 @@ class MainWindow(QMainWindow):
             partial(self._detach_ip, node),
         )
         menu.addAction(
-            "Delete addresses",
+            "Delete address",
             partial(self._apply,
                     f"Delete IPv{node.family} config from {node.parent_name}",
-                    actions.plan_remove_addresses(node.parent_name, node.cidrs)),
+                    actions.plan_remove_addresses(node.parent_name, [node.cidr])),
         )
 
     def _attachable_ifaces(self, exclude: str | None = None) -> list[Interface]:
@@ -430,23 +451,29 @@ class MainWindow(QMainWindow):
     def _add_ip_dialog(self, ifname: str, family: int) -> None:
         dialog = IpConfigDialog(self, family, title=f"Add IPv{family} config to {ifname}")
         if dialog.exec():
+            cidr, name = dialog.cidr, dialog.name
             self._apply(
                 f"Add IPv{family} config to {ifname}",
-                actions.plan_add_addresses(ifname, dialog.cidrs),
+                actions.plan_add_addresses(ifname, [cidr]),
+                on_success=(lambda: self.canvas.set_ip_name(family, cidr, name)) if name else None,
             )
 
     def _edit_ip_dialog(self, node: IpNode) -> None:
-        dialog = IpConfigDialog(self, node.family, initial=node.cidrs)
+        dialog = IpConfigDialog(self, node.family, initial=node.cidr, name=node.alias)
         if not dialog.exec():
             return
         if node.is_draft:
-            self.canvas.update_draft(node.draft_id, dialog.cidrs)
+            self.canvas.update_draft(node.draft_id, dialog.cidr)
+            self.canvas.set_ip_name(node.family, dialog.cidr, dialog.name)
             return
-        removed = [c for c in node.cidrs if c not in dialog.cidrs]
-        added = [c for c in dialog.cidrs if c not in node.cidrs]
-        plan = actions.plan_remove_addresses(node.parent_name, removed) + \
-            actions.plan_add_addresses(node.parent_name, added)
-        self._apply(f"Edit IPv{node.family} config on {node.parent_name}", plan)
+        cidr, name, family, parent = dialog.cidr, dialog.name, node.family, node.parent_name
+        rename = lambda: self.canvas.set_ip_name(family, cidr, name)  # noqa: E731
+        if cidr != node.cidr:
+            plan = actions.plan_remove_addresses(parent, [node.cidr]) + \
+                actions.plan_add_addresses(parent, [cidr])
+            self._apply(f"Edit IPv{family} config on {parent}", plan, on_success=rename)
+        else:
+            rename()  # only the name changed; no kernel change needed
 
     def _add_vlan_dialog(self, ifname: str) -> None:
         dialog = VlanDialog(self, ifname, self.state.link_names() if self.state else set())
@@ -459,25 +486,70 @@ class MainWindow(QMainWindow):
     def _new_draft_dialog(self, family: int, scene_pos: QPointF) -> None:
         dialog = IpConfigDialog(self, family, title=f"New IPv{family} config (draft)")
         if dialog.exec():
-            self.canvas.add_draft(family, dialog.cidrs, scene_pos)
+            self.canvas.add_draft(family, dialog.cidr, scene_pos, name=dialog.name)
+
+    def _name_ip_dialog(self, node: IpNode) -> None:
+        text, ok = QInputDialog.getText(
+            self, "Name this address", "Name (blank to clear):", text=node.alias
+        )
+        if ok:
+            self.canvas.set_ip_name(node.family, node.cidr, text.strip())
 
     def _attach_draft(self, node: IpNode, ifname: str) -> None:
         draft_id = node.draft_id
         self._apply(
             f"Attach IPv{node.family} config to {ifname}",
-            actions.plan_add_addresses(ifname, node.cidrs),
+            actions.plan_add_addresses(ifname, [node.cidr]),
             on_success=lambda: self.canvas.remove_draft(draft_id),
         )
 
     def _clone_ip(self, node: IpNode) -> None:
-        self.canvas.add_draft(
-            node.family, node.cidrs, node.pos() + QPointF(30, 30)
-        )
+        self.canvas.add_draft(node.family, node.cidr, node.pos() + QPointF(30, 30))
 
     def _detach_ip(self, node: IpNode) -> None:
-        family, cidrs, pos = node.family, list(node.cidrs), node.pos()
+        family, cidr, pos = node.family, node.cidr, node.pos()
         self._apply(
             f"Detach IPv{family} config from {node.parent_name}",
-            actions.plan_remove_addresses(node.parent_name, cidrs),
-            on_success=lambda: self.canvas.add_draft(family, cidrs, pos),
+            actions.plan_remove_addresses(node.parent_name, [cidr]),
+            on_success=lambda: self.canvas.add_draft(family, cidr, pos),
         )
+
+    def _link_properties_dialog(self, iface: Interface) -> None:
+        if not self.state:
+            return
+        others = self.state.link_names() - {iface.name}
+        dlg = LinkPropertiesDialog(
+            self, iface, others,
+            dns=self.state.dns, dns_search=self.state.dns_search,
+            can_edit_dns=self.state.can_edit_dns,
+        )
+        if not dlg.exec():
+            return
+        plan: list[list[str]] = []
+        changed: list[str] = []
+        # Link-level changes apply under the current name; rename goes last.
+        if dlg.mtu != iface.mtu:
+            plan += actions.plan_set_mtu(iface.name, dlg.mtu)
+            changed.append("MTU")
+        if dlg.mac != iface.mac:
+            plan += actions.plan_set_mac(iface.name, dlg.mac)
+            changed.append("MAC")
+        if dlg.link_alias != iface.alias:
+            plan += actions.plan_set_alias(iface.name, dlg.link_alias)
+            changed.append("alias")
+        # Gateway/DNS only when Static is chosen; Dynamic leaves DHCP alone.
+        if dlg.gateway_static:
+            if dlg.gateway and dlg.gateway != iface.gateway:
+                plan += actions.plan_set_gateway(iface.name, dlg.gateway)
+                changed.append("gateway")
+            elif not dlg.gateway and iface.gateway:
+                plan += actions.plan_clear_gateway(iface.name)
+                changed.append("gateway")
+        if dlg.dns_static and dlg.dns_servers != self.state.dns:
+            plan += actions.plan_set_dns(iface.name, dlg.dns_servers, dlg.dns_search)
+            changed.append("DNS")
+        if dlg.new_name != iface.name:
+            plan += actions.plan_rename_link(iface.name, dlg.new_name, iface.is_up)
+            changed.append("name")
+        if plan:
+            self._apply(f"Update {iface.name} ({', '.join(changed)})", plan)

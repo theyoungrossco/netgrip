@@ -64,3 +64,70 @@ def test_link_name_validation():
 def test_next_bond_name_skips_taken():
     assert actions.next_bond_name(set()) == "bond0"
     assert actions.next_bond_name({"bond0", "bond1"}) == "bond2"
+
+
+def test_mac_validation():
+    assert actions.valid_mac("52:54:00:a1:b2:c3")
+    assert actions.valid_mac("00:11:22:33:44:55")
+    assert not actions.valid_mac("")
+    assert not actions.valid_mac("52:54:00:a1:b2")  # too short
+    assert not actions.valid_mac("zz:54:00:a1:b2:c3")  # non-hex
+    assert not actions.valid_mac("52-54-00-a1-b2-c3")  # wrong separator
+    # Multicast (low bit of first octet set) is not a valid device address.
+    assert not actions.valid_mac("01:00:5e:00:00:01")
+
+
+def test_set_mac_mtu_alias_plans():
+    assert actions.plan_set_mac("eth0", "52:54:00:0a:0b:0c") == [
+        ["ip", "link", "set", "dev", "eth0", "address", "52:54:00:0a:0b:0c"]
+    ]
+    assert actions.plan_set_mtu("eth0", 9000) == [
+        ["ip", "link", "set", "dev", "eth0", "mtu", "9000"]
+    ]
+    assert actions.plan_set_alias("eth0", "uplink") == [
+        ["ip", "link", "set", "dev", "eth0", "alias", "uplink"]
+    ]
+    # Empty alias clears the kernel ifalias.
+    assert actions.plan_set_alias("eth0", "") == [
+        ["ip", "link", "set", "dev", "eth0", "alias", ""]
+    ]
+
+
+def test_rename_link_downs_then_renames_and_restores_state():
+    up = actions.plan_rename_link("eth0", "wan0", was_up=True)
+    assert up == [
+        ["ip", "link", "set", "dev", "eth0", "down"],
+        ["ip", "link", "set", "dev", "eth0", "name", "wan0"],
+        ["ip", "link", "set", "dev", "wan0", "up"],
+    ]
+    # A link that was down stays down — no trailing "up".
+    down = actions.plan_rename_link("eth0", "wan0", was_up=False)
+    assert down[-1] == ["ip", "link", "set", "dev", "eth0", "name", "wan0"]
+
+
+def test_ipaddr_validation():
+    assert actions.valid_ipaddr("192.168.1.1")
+    assert actions.valid_ipaddr("2001:db8::1")
+    assert not actions.valid_ipaddr("192.168.1.1/24")  # bare address, no prefix
+    assert not actions.valid_ipaddr("not-an-ip")
+    assert not actions.valid_ipaddr("")
+
+
+def test_gateway_plans():
+    # `replace` so it works whether or not a default route already exists.
+    assert actions.plan_set_gateway("eth0", "192.168.1.1") == [
+        ["ip", "route", "replace", "default", "via", "192.168.1.1", "dev", "eth0"]
+    ]
+    assert actions.plan_clear_gateway("eth0") == [
+        ["ip", "route", "del", "default", "dev", "eth0"]
+    ]
+
+
+def test_set_dns_plan_with_and_without_search():
+    assert actions.plan_set_dns("eth0", ["1.1.1.1", "9.9.9.9"], []) == [
+        ["resolvectl", "dns", "eth0", "1.1.1.1", "9.9.9.9"]
+    ]
+    assert actions.plan_set_dns("eth0", ["1.1.1.1"], ["lan.example"]) == [
+        ["resolvectl", "dns", "eth0", "1.1.1.1"],
+        ["resolvectl", "domain", "eth0", "lan.example"],
+    ]

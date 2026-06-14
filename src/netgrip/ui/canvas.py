@@ -8,8 +8,24 @@ from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import QApplication, QGraphicsScene, QGraphicsView
 
+from netgrip.core import store
 from netgrip.core.model import HostState
-from netgrip.ui.items import BaseNode, Edge, GroupNode, IpNode, NicNode, VlanNode, new_draft_id
+from netgrip.ui.items import (
+    BaseNode,
+    DnsNode,
+    Edge,
+    GroupNode,
+    IpNode,
+    NicNode,
+    VlanNode,
+    new_draft_id,
+)
+
+
+def _alias_key(family: int, cidr: str) -> str:
+    """Key under which a user-given box name is stored. Keyed by address (not
+    by interface) so a name follows its address as it is moved or detached."""
+    return f"{family}:{cidr}"
 
 MARGIN = 30.0
 COL_W = 270.0
@@ -38,8 +54,10 @@ class Canvas(QGraphicsView):
 
         self._state: HostState | None = None
         self._show_loopback = False
+        self._host_label: str | None = None  # whose persisted state is loaded
         self._positions: dict[str, QPointF] = {}  # remembered node positions
-        self._drafts: list[dict] = []  # {id, family, cidrs, pos}
+        self._drafts: list[dict] = []  # {id, family, cidr, pos}
+        self._aliases: dict[str, str] = {}  # _alias_key() -> user box name
 
     # ------------------------------------------------------------------ #
     # population & layout
@@ -48,6 +66,8 @@ class Canvas(QGraphicsView):
         if show_loopback is not None:
             self._show_loopback = show_loopback
         self._state = state
+        if state is not None and state.label != self._host_label:
+            self._load_state_for(state.label)
         scene = self.scene()
         scene.clear()
         if state is None:
@@ -72,13 +92,16 @@ class Canvas(QGraphicsView):
 
         ip_nodes: list[IpNode] = []
         for iface in shown:
-            for family in (4, 6):
-                addrs = iface.addresses_for(family)
-                if addrs:
-                    ip_nodes.append(IpNode.from_addresses(family, addrs, iface.name))
+            for addr in iface.addresses:
+                alias = self._aliases.get(_alias_key(addr.family, addr.cidr), "")
+                ip_nodes.append(IpNode.from_address(addr, iface.name, alias=alias))
 
         draft_nodes = [
-            IpNode(d["family"], d["cidrs"], None, draft_id=d["id"]) for d in self._drafts
+            IpNode(
+                d["family"], d["cidr"], None, draft_id=d["id"],
+                alias=self._aliases.get(_alias_key(d["family"], d["cidr"]), ""),
+            )
+            for d in self._drafts
         ]
 
         # Parent->children map drives both the edges and the tree layout.
@@ -108,10 +131,17 @@ class Canvas(QGraphicsView):
 
         roots.sort(key=root_rank)
 
-        for node in [*if_nodes.values(), *ip_nodes, *draft_nodes]:
+        # System DNS sits in its own grey box, unattached to any interface.
+        dns_node = DnsNode(state.dns, state.dns_search) if (state.dns or state.dns_search) else None
+
+        all_nodes: list[BaseNode] = [*if_nodes.values(), *ip_nodes, *draft_nodes]
+        if dns_node is not None:
+            all_nodes.append(dns_node)
+        for node in all_nodes:
             scene.addItem(node)
             node.drag_finished.connect(self._make_drop_handler(node))
-            if node.key:
+            node.drag_finished.connect(self._save_state)
+            if node.key and not (isinstance(node, IpNode) and node.is_draft):
                 node.moved.connect(self._make_position_saver(node))
 
         # Edges: vlan->parent, member->group, ip->owner.
@@ -124,22 +154,29 @@ class Canvas(QGraphicsView):
         for ip_node in ip_nodes:
             scene.addItem(Edge(if_nodes[ip_node.parent_name], ip_node))
 
-        self._layout_tree(roots, children, if_nodes)
+        top = MARGIN
+        if dns_node is not None:
+            dns_node.setPos(MARGIN, MARGIN)  # top-left; tree starts below it
+            top = MARGIN + dns_node.boundingRect().height() + V_GAP
+        self._layout_tree(roots, children, if_nodes, top)
 
         for draft, node in zip(self._drafts, draft_nodes, strict=True):
             node.setPos(draft["pos"])
             node.moved.connect(self._make_draft_position_saver(draft, node))
 
         # Remembered positions win over the automatic layout.
-        for node in [*if_nodes.values(), *ip_nodes]:
+        restore = [*if_nodes.values(), *ip_nodes]
+        if dns_node is not None:
+            restore.append(dns_node)
+        for node in restore:
             if node.key in self._positions:
                 node.setPos(self._positions[node.key])
 
         rect = scene.itemsBoundingRect().adjusted(-MARGIN, -MARGIN, MARGIN, MARGIN)
         scene.setSceneRect(rect)
 
-    def _layout_tree(self, roots, children, if_nodes) -> None:
-        y = MARGIN
+    def _layout_tree(self, roots, children, if_nodes, top: float = MARGIN) -> None:
+        y = top
 
         def place(node: BaseNode, depth: int, top: float) -> float:
             """Position node and its subtree; return the subtree height."""
@@ -160,25 +197,85 @@ class Canvas(QGraphicsView):
 
     def auto_layout(self) -> None:
         self._positions.clear()
+        self._save_state()
+        self.populate(self._state)
+
+    # ------------------------------------------------------------------ #
+    # persisted state (drafts, positions, box names) — see core/store.py
+    # ------------------------------------------------------------------ #
+    def _load_state_for(self, label: str) -> None:
+        self._host_label = label
+        data = store.load_host(label)
+        self._positions = {}
+        for key, xy in data["positions"].items():
+            if isinstance(xy, (list, tuple)) and len(xy) == 2:
+                self._positions[key] = QPointF(float(xy[0]), float(xy[1]))
+        self._aliases = {str(k): str(v) for k, v in data["aliases"].items()}
+        self._drafts = []
+        for d in data["drafts"]:
+            try:
+                pos = d["pos"]
+                self._drafts.append({
+                    "id": new_draft_id(),
+                    "family": int(d["family"]),
+                    "cidr": str(d["cidr"]),
+                    "pos": QPointF(float(pos[0]), float(pos[1])),
+                })
+            except (KeyError, TypeError, ValueError, IndexError):
+                continue  # skip any malformed draft, keep the rest
+
+    def _save_state(self) -> None:
+        if self._host_label is None:
+            return
+        store.save_host(self._host_label, {
+            "positions": {k: [p.x(), p.y()] for k, p in self._positions.items()},
+            "drafts": [
+                {"family": d["family"], "cidr": d["cidr"],
+                 "pos": [d["pos"].x(), d["pos"].y()]}
+                for d in self._drafts
+            ],
+            "aliases": dict(self._aliases),
+        })
+
+    def set_ip_name(self, family: int, cidr: str, name: str) -> None:
+        """Give (or, with an empty name, clear) a box's free-form label.
+
+        Keyed by address, so the name follows it across moves and detaches.
+        """
+        key = _alias_key(family, cidr)
+        if name:
+            self._aliases[key] = name
+        else:
+            self._aliases.pop(key, None)
+        self._save_state()
         self.populate(self._state)
 
     # ------------------------------------------------------------------ #
     # drafts (IP configs not attached to any interface yet)
     # ------------------------------------------------------------------ #
-    def add_draft(self, family: int, cidrs: list[str], scene_pos: QPointF) -> None:
+    def add_draft(self, family: int, cidr: str, scene_pos: QPointF, name: str = "") -> None:
         self._drafts.append(
-            {"id": new_draft_id(), "family": family, "cidrs": list(cidrs), "pos": scene_pos}
+            {"id": new_draft_id(), "family": family, "cidr": cidr, "pos": scene_pos}
         )
+        if name:
+            self._aliases[_alias_key(family, cidr)] = name
+        self._save_state()
         self.populate(self._state)
 
-    def update_draft(self, draft_id: int, cidrs: list[str]) -> None:
+    def update_draft(self, draft_id: int, cidr: str) -> None:
         for d in self._drafts:
             if d["id"] == draft_id:
-                d["cidrs"] = list(cidrs)
+                old_key = _alias_key(d["family"], d["cidr"])
+                new_key = _alias_key(d["family"], cidr)
+                if old_key != new_key and old_key in self._aliases:
+                    self._aliases[new_key] = self._aliases.pop(old_key)
+                d["cidr"] = cidr
+        self._save_state()
         self.populate(self._state)
 
     def remove_draft(self, draft_id: int) -> None:
         self._drafts = [d for d in self._drafts if d["id"] != draft_id]
+        self._save_state()
         self.populate(self._state)
 
     # ------------------------------------------------------------------ #

@@ -124,12 +124,23 @@ class BaseNode(QGraphicsObject):
         self._press_pos = None
 
 
+def _gateway_line(iface: Interface) -> str | None:
+    if not iface.gateway:
+        return None
+    return f"via {iface.gateway}" + ("  (dhcp)" if iface.gateway_dynamic else "")
+
+
 def _iface_detail(iface: Interface) -> list[str]:
     lines = []
+    if iface.alias:
+        lines.append(iface.alias)
     if iface.mac:
         lines.append(f"{iface.mac}   mtu {iface.mtu}")
     else:
         lines.append(f"mtu {iface.mtu}")
+    gw = _gateway_line(iface)
+    if gw:
+        lines.append(gw)
     if iface.master:
         lines.append(f"member of {iface.master}")
     if iface.kind not in ("physical", "loopback", "vlan", "bond", "bridge"):
@@ -156,11 +167,16 @@ class GroupNode(BaseNode):
 
     def __init__(self, iface: Interface, member_count: int):
         lines = []
+        if iface.alias:
+            lines.append(iface.alias)
         if iface.kind == "bond":
             lines.append(BOND_MODES.get(iface.bond_mode or "", iface.bond_mode or "bond"))
         else:
             lines.append(iface.kind)
         lines.append(f"{member_count} member{'s' if member_count != 1 else ''}")
+        gw = _gateway_line(iface)
+        if gw:
+            lines.append(gw)
         super().__init__(iface.name, lines, QColor("#f6e8d4"), QColor("#a8742f"))
         self.iface = iface
         self.key = f"if:{iface.name}"
@@ -173,6 +189,11 @@ class VlanNode(BaseNode):
     def __init__(self, iface: Interface):
         title = f"VLAN {iface.vlan_id}"
         lines = [iface.name, f"on {iface.vlan_parent}"]
+        if iface.alias:
+            lines.insert(1, iface.alias)
+        gw = _gateway_line(iface)
+        if gw:
+            lines.append(gw)
         super().__init__(title, lines, QColor("#dcefec"), QColor("#2f8a80"))
         self.iface = iface
         self.key = f"if:{iface.name}"
@@ -181,29 +202,36 @@ class VlanNode(BaseNode):
         self._paint_status_dot(painter, self.iface.is_up)
 
 
-class IpNode(BaseNode):
-    """An IP configuration: all addresses of one family on one interface,
-    or a draft not yet attached anywhere."""
+def ip_key(parent_name: str, cidr: str) -> str:
+    """Stable id for an attached address box (remembers position & name)."""
+    return f"ip:{parent_name}:{cidr}"
 
-    def __init__(self, family: int, cidrs: list[str], parent_name: str | None,
-                 dynamic_cidrs: set[str] | None = None, draft_id: int | None = None):
+
+class IpNode(BaseNode):
+    """One IP address: a single CIDR of one family on one interface, or a
+    draft (single address) not yet attached anywhere. May carry a free-form
+    name the user has given it."""
+
+    def __init__(self, family: int, cidr: str, parent_name: str | None,
+                 dynamic: bool = False, draft_id: int | None = None, alias: str = ""):
         self.family = family
-        self.cidrs = list(cidrs)
+        self.cidr = cidr
         self.parent_name = parent_name
         self.draft_id = draft_id
-        dynamic_cidrs = dynamic_cidrs or set()
+        self.alias = alias
 
-        title = f"IPv{family}" + (" (draft)" if self.is_draft else "")
-        lines = [c + ("  (dhcp)" if c in dynamic_cidrs else "") for c in self.cidrs]
-        if not lines:
-            lines = ["(no addresses)"]
+        family_label = f"IPv{family}"
+        title = (alias or family_label) + (" (draft)" if self.is_draft else "")
+        lines = [cidr + ("  (dhcp)" if dynamic else "")] if cidr else ["(no address)"]
+        if alias:
+            lines.append(family_label)  # keep the family visible behind the name
         if family == 4:
             body, border = QColor("#e0f0dc"), QColor("#3f8a44")
         else:
             body, border = QColor("#e9e2f6"), QColor("#6d51a8")
         super().__init__(title, lines, body, border, dashed=self.is_draft)
         if parent_name:
-            self.key = f"ip{family}:{parent_name}"
+            self.key = ip_key(parent_name, cidr)
         elif draft_id is not None:
             self.key = f"draft:{draft_id}"
 
@@ -212,17 +240,30 @@ class IpNode(BaseNode):
         return self.parent_name is None
 
     @classmethod
-    def from_addresses(cls, family: int, addresses: list[Address], parent_name: str) -> IpNode:
+    def from_address(cls, address: Address, parent_name: str, alias: str = "") -> IpNode:
         return cls(
-            family,
-            [a.cidr for a in addresses],
-            parent_name,
-            dynamic_cidrs={a.cidr for a in addresses if a.dynamic},
+            address.family, address.cidr, parent_name,
+            dynamic=address.dynamic, alias=alias,
         )
 
 
 def new_draft_id() -> int:
     return next(_draft_ids)
+
+
+class DnsNode(BaseNode):
+    """The host's effective DNS resolvers (read from resolv.conf).
+
+    System-level and read-only here; per-link DNS is set from a link's
+    Properties dialog. Drawn as a neutral grey box, with no connecting lines.
+    """
+
+    def __init__(self, servers: list[str], search: list[str]):
+        lines = list(servers) or ["(none)"]
+        if search:
+            lines.append("search " + " ".join(search))
+        super().__init__("DNS", lines, QColor("#eceef0"), QColor("#7a828a"))
+        self.key = "sys:dns"
 
 
 class Edge(QGraphicsPathItem):

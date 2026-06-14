@@ -37,10 +37,13 @@ class Interface:
     state: str = "down"  # up | down
     mac: str = ""
     mtu: int = 0
+    alias: str = ""  # kernel ifalias: a human label, set with `ip link set dev X alias`
     master: str | None = None  # name of the bond/bridge this NIC is enslaved to
     vlan_id: int | None = None
     vlan_parent: str | None = None
     bond_mode: str | None = None
+    gateway: str = ""  # default route reached via this link (from `ip route`)
+    gateway_dynamic: bool = False  # the default route was installed by DHCP / RA
     addresses: list[Address] = field(default_factory=list)
 
     @property
@@ -61,6 +64,9 @@ class HostState:
 
     label: str
     interfaces: list[Interface] = field(default_factory=list)
+    dns: list[str] = field(default_factory=list)  # effective nameservers (resolv.conf)
+    dns_search: list[str] = field(default_factory=list)  # search domains
+    can_edit_dns: bool = False  # systemd-resolved (resolvectl) present for per-link DNS
 
     def get(self, name: str) -> Interface | None:
         return next((i for i in self.interfaces if i.name == name), None)

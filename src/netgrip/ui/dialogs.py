@@ -8,26 +8,97 @@ import shlex
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QComboBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
-    QMessageBox,
     QPlainTextEdit,
+    QRadioButton,
     QSpinBox,
     QVBoxLayout,
+    QWidget,
 )
 
 from netgrip.core.actions import (
     BOND_MODES,
     default_vlan_name,
     next_bond_name,
+    valid_ipaddr,
     valid_link_name,
+    valid_mac,
 )
+from netgrip.core.model import Interface
+
+
+def _error_label() -> QLabel:
+    """A red, word-wrapping label for inline validation errors.
+
+    Project rule: a dialog never opens another dialog (no stacked modals), so
+    invalid input is reported in-place here rather than via a popup.
+    """
+    label = QLabel()
+    label.setStyleSheet("color: #c34a3a;")
+    label.setWordWrap(True)
+    return label
+
+
+class DynamicStaticField(QWidget):
+    """A value with a Dynamic / Static toggle.
+
+    *Dynamic* shows the current (e.g. DHCP-assigned) value, greyed and
+    read-only, and means "leave it as it is". *Static* enables the field to
+    type a custom value. When ``allow_static`` is false the Static option is
+    disabled (e.g. per-link DNS with no systemd-resolved present).
+    """
+
+    def __init__(self, current: str = "", is_dynamic: bool = True,
+                 placeholder: str = "", allow_static: bool = True):
+        super().__init__()
+        self._current = current
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        radios = QHBoxLayout()
+        self._dynamic_btn = QRadioButton("Dynamic")
+        self._static_btn = QRadioButton("Static")
+        self._static_btn.setEnabled(allow_static)
+        group = QButtonGroup(self)
+        group.addButton(self._dynamic_btn)
+        group.addButton(self._static_btn)
+        radios.addWidget(self._dynamic_btn)
+        radios.addWidget(self._static_btn)
+        radios.addStretch(1)
+        layout.addLayout(radios)
+
+        self._edit = QLineEdit(current)
+        self._edit.setPlaceholderText(placeholder)
+        layout.addWidget(self._edit)
+
+        self._dynamic_btn.toggled.connect(self._sync)
+        start_static = bool(allow_static and not is_dynamic)
+        (self._static_btn if start_static else self._dynamic_btn).setChecked(True)
+        self._sync()
+
+    def _sync(self) -> None:
+        dynamic = self._dynamic_btn.isChecked()
+        self._edit.setReadOnly(dynamic)
+        # Qt greys a read-only field weakly; disabling reads as clearly inert.
+        self._edit.setEnabled(not dynamic)
+        if dynamic:
+            self._edit.setText(self._current)
+
+    @property
+    def is_static(self) -> bool:
+        return self._static_btn.isChecked()
+
+    def value(self) -> str:
+        return self._edit.text().strip()
 
 
 def parse_cidrs(text: str, family: int) -> list[str]:
@@ -52,35 +123,150 @@ def parse_cidrs(text: str, family: int) -> list[str]:
 
 
 class IpConfigDialog(QDialog):
-    """Edit the address list of one IP box (one address per line, CIDR)."""
+    """Edit one IP address (a single CIDR) and an optional free-form name."""
 
-    def __init__(self, parent, family: int, initial: list[str] | None = None,
+    def __init__(self, parent, family: int, initial: str = "", name: str = "",
                  title: str | None = None):
         super().__init__(parent)
         self.family = family
-        self.cidrs: list[str] = []
+        self.cidr = ""
+        self.name = ""
         self.setWindowTitle(title or f"IPv{family} configuration")
 
         example = "192.168.1.20/24" if family == 4 else "2001:db8::20/64"
-        layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(f"One address per line, CIDR notation (e.g. {example}):"))
-        self._edit = QPlainTextEdit("\n".join(initial or []))
-        self._edit.setMinimumWidth(320)
-        layout.addWidget(self._edit)
+        form = QFormLayout(self)
+        self._addr_edit = QLineEdit(initial)
+        self._addr_edit.setPlaceholderText(example)
+        self._addr_edit.setMinimumWidth(300)
+        form.addRow("Address (CIDR):", self._addr_edit)
+        self._name_edit = QLineEdit(name)
+        self._name_edit.setPlaceholderText("optional label, e.g. uplink")
+        form.addRow("Name:", self._name_edit)
+        self._error = _error_label()
+        form.addRow(self._error)
+
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
         buttons.accepted.connect(self._accept)
         buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+        form.addRow(buttons)
 
     def _accept(self) -> None:
         try:
-            self.cidrs = parse_cidrs(self._edit.toPlainText(), self.family)
+            # Reuse the list validator, then take the single address from it.
+            self.cidr = parse_cidrs(self._addr_edit.text(), self.family)[0]
         except ValueError as exc:
-            QMessageBox.warning(self, "Invalid address", str(exc))
+            self._error.setText(str(exc))
             return
+        self.name = self._name_edit.text().strip()
         self.accept()
+
+
+class LinkPropertiesDialog(QDialog):
+    """Edit a link's MAC, MTU, alias, name, default gateway and DNS.
+
+    Gateway and DNS each use a Dynamic/Static toggle: Dynamic leaves the
+    current (often DHCP-assigned) value alone, Static applies a custom one.
+    """
+
+    def __init__(self, parent, iface: Interface, other_names: set[str],
+                 dns: list[str] | None = None, dns_search: list[str] | None = None,
+                 can_edit_dns: bool = False):
+        super().__init__(parent)
+        self.setWindowTitle(f"{iface.name} properties")
+        self._iface = iface
+        self._others = other_names
+        self._dns_search = list(dns_search or [])
+        # Results read by the caller after exec():
+        self.new_name = iface.name
+        self.mac = iface.mac
+        self.mtu = iface.mtu
+        self.link_alias = iface.alias
+        self.gateway_static = False
+        self.gateway = iface.gateway
+        self.dns_static = False
+        self.dns_servers: list[str] = list(dns or [])
+
+        form = QFormLayout(self)
+        self._name_edit = QLineEdit(iface.name)
+        form.addRow("Name:", self._name_edit)
+        self._mac_edit = QLineEdit(iface.mac)
+        self._mac_edit.setPlaceholderText("xx:xx:xx:xx:xx:xx")
+        form.addRow("MAC address:", self._mac_edit)
+        self._mtu_spin = QSpinBox()
+        self._mtu_spin.setRange(68, 65536)
+        self._mtu_spin.setValue(iface.mtu or 1500)
+        form.addRow("MTU:", self._mtu_spin)
+        self._alias_edit = QLineEdit(iface.alias)
+        self._alias_edit.setPlaceholderText("optional label stored on the link")
+        form.addRow("Alias:", self._alias_edit)
+
+        self._gw_field = DynamicStaticField(
+            current=iface.gateway, is_dynamic=iface.gateway_dynamic or not iface.gateway,
+            placeholder="e.g. 192.168.1.1",
+        )
+        form.addRow("Default gateway:", self._gw_field)
+        self._dns_field = DynamicStaticField(
+            current=" ".join(dns or []), is_dynamic=True,
+            placeholder="space-separated, e.g. 1.1.1.1 9.9.9.9",
+            allow_static=can_edit_dns,
+        )
+        form.addRow("DNS servers:", self._dns_field)
+        if not can_edit_dns:
+            hint = QLabel("Setting DNS needs systemd-resolved (full support in 0.2).")
+            hint.setStyleSheet("color: #777;")
+            form.addRow("", hint)
+
+        self._error = _error_label()
+        form.addRow(self._error)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self._accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+
+    def _accept(self) -> None:
+        name = self._name_edit.text().strip()
+        if not valid_link_name(name):
+            self._error.setText(
+                "Interface names are 1-15 characters: letters, digits, '.', '-', '_'."
+            )
+            return
+        if name != self._iface.name and name in self._others:
+            self._error.setText(f"'{name}' already exists.")
+            return
+        mac = self._mac_edit.text().strip()
+        if mac and not valid_mac(mac):
+            self._error.setText("Enter a unicast MAC like 52:54:00:a1:b2:c3.")
+            return
+
+        gw = self._gw_field.value()
+        if self._gw_field.is_static and gw and not valid_ipaddr(gw):
+            self._error.setText(f"'{gw}' is not a valid gateway address.")
+            return
+        servers = self._dns_field.value().split()
+        if self._dns_field.is_static:
+            bad = next((s for s in servers if not valid_ipaddr(s)), None)
+            if bad:
+                self._error.setText(f"'{bad}' is not a valid DNS server address.")
+                return
+
+        self.new_name = name
+        self.mac = mac or self._iface.mac  # blank means leave it unchanged
+        self.mtu = self._mtu_spin.value()
+        self.link_alias = self._alias_edit.text().strip()
+        self.gateway_static = self._gw_field.is_static
+        self.gateway = gw
+        self.dns_static = self._dns_field.is_static
+        self.dns_servers = servers
+        self.accept()
+
+    @property
+    def dns_search(self) -> list[str]:
+        return self._dns_search
 
 
 class VlanDialog(QDialog):
@@ -102,6 +288,8 @@ class VlanDialog(QDialog):
         self._id_spin.valueChanged.connect(
             lambda v: self._name_edit.setPlaceholderText(default_vlan_name(parent_ifname, v))
         )
+        self._error = _error_label()
+        form.addRow(self._error)
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
@@ -115,13 +303,12 @@ class VlanDialog(QDialog):
             self._parent_ifname, self.vlan_id
         )
         if not valid_link_name(self.name):
-            QMessageBox.warning(
-                self, "Invalid name",
-                "Interface names are 1-15 characters: letters, digits, '.', '-', '_'.",
+            self._error.setText(
+                "Interface names are 1-15 characters: letters, digits, '.', '-', '_'."
             )
             return
         if self.name in self._existing:
-            QMessageBox.warning(self, "Name in use", f"'{self.name}' already exists.")
+            self._error.setText(f"'{self.name}' already exists.")
             return
         self.accept()
 
@@ -156,6 +343,8 @@ class BondDialog(QDialog):
             )
             self._member_list.addItem(item)
         form.addRow("Members:", self._member_list)
+        self._error = _error_label()
+        form.addRow(self._error)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -167,13 +356,12 @@ class BondDialog(QDialog):
     def _accept(self) -> None:
         self.name = self._name_edit.text().strip()
         if not valid_link_name(self.name):
-            QMessageBox.warning(
-                self, "Invalid name",
-                "Interface names are 1-15 characters: letters, digits, '.', '-', '_'.",
+            self._error.setText(
+                "Interface names are 1-15 characters: letters, digits, '.', '-', '_'."
             )
             return
         if self.name in self._existing:
-            QMessageBox.warning(self, "Name in use", f"'{self.name}' already exists.")
+            self._error.setText(f"'{self.name}' already exists.")
             return
         self.mode = self._mode_combo.currentData()
         self.members = [
@@ -182,7 +370,7 @@ class BondDialog(QDialog):
             if self._member_list.item(i).checkState() == Qt.CheckState.Checked
         ]
         if not self.members:
-            QMessageBox.warning(self, "No members", "Select at least one member NIC.")
+            self._error.setText("Select at least one member NIC.")
             return
         self.accept()
 

@@ -31,9 +31,10 @@ differs between managing localhost and managing a remote machine.
 | module | role |
 |---|---|
 | `model.py` | `Interface`, `Address`, `HostState` dataclasses |
-| `probe.py` | parse `ip -details -json address show` into the model |
+| `probe.py` | parse `ip -json` address/route output + resolv.conf into the model |
 | `actions.py` | `plan_*()` functions returning `list[list[str]]` command plans |
 | `runner.py` | `LocalRunner`, `SSHRunner`, `DemoRunner` |
+| `store.py` | JSON persistence of UI state (drafts, positions, box names) |
 | `sshhosts.py` | `~/.ssh/config` Host alias discovery |
 | `demo.py` | canned interfaces for demo mode |
 
@@ -58,7 +59,7 @@ Design decisions worth knowing:
 
 | module | role |
 |---|---|
-| `items.py` | `BaseNode` (flat rectangle), `NicNode`, `GroupNode`, `VlanNode`, `IpNode`, `Edge` (straight line) |
+| `items.py` | `BaseNode` (flat rectangle), `NicNode`, `GroupNode`, `VlanNode`, `IpNode`, `DnsNode`, `Edge` (straight line) |
 | `canvas.py` | scene population, tree auto-layout, drop-target detection, drafts |
 | `main_window.py` | host picker, context menus, gesture → plan → confirm → apply |
 | `dialogs.py` | address/VLAN/bond input with validation, command confirmation |
@@ -68,12 +69,15 @@ Notes:
 
 - The visual language is deliberately flat: rectangles and straight lines.
   Resist the urge to add gradients, curves or shadows.
-- An `IpNode` is *all addresses of one family on one interface*. Finer
-  granularity (per-address boxes) was considered and rejected for clutter;
-  the Edit dialog covers the rare per-address operation.
+- An `IpNode` is *one address* (one CIDR of one family on one interface, or a
+  detached draft). One box per address means a single address drags to a new
+  interface on its own; a box can also carry a free-form name the user gives
+  it (kept in `core/store.py`, not the kernel).
 - Auto-layout is a simple DFS tree walk: column = depth (NIC → bond/VLAN →
   IP), row = subtree height. User-moved boxes keep their positions across
-  refreshes (`Canvas._positions`); "Auto-layout" resets them.
+  refreshes (`Canvas._positions`); "Auto-layout" resets them. Positions,
+  drafts and box names are written through `core/store.py` so they also
+  survive a restart, keyed per host.
 - Drops count only when the dragged box overlaps a valid target by ≥35% of
   its own area; anything less is just repositioning.
 - The UI never blocks on the network: probes and applies run in

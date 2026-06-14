@@ -6,6 +6,27 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- One IP box per address (was one box per family), so a single address can be
+  dragged, cloned or detached on its own
+- Link **Properties** dialog: edit a NIC/bond/VLAN's MAC, MTU and alias, or
+  rename the interface
+- **Default gateway** per interface, shown on the box and editable with a
+  Dynamic/Static toggle (Dynamic leaves a DHCP-assigned gateway untouched)
+- **DNS servers** read from `/etc/resolv.conf` and shown in a system DNS box;
+  settable per-link via `resolvectl` where systemd-resolved is present
+- Free-form **names** for IP-config boxes, shown as the box title
+- Interface **alias** (kernel `ifalias`) is read and shown on the box
+- Drafts, box positions and box names **persist to disk** (under
+  `~/.local/share/netgrip/`) and are restored on the next launch
+- `AGENTS.md` contributor/agent guide (imported by `CLAUDE.md`)
+
+### Changed
+
+- Dialogs report invalid input **inline** instead of opening a second dialog;
+  no stacked modal popups anywhere (project rule)
+
 ## [0.1.0] - 2026-06-12
 
 Initial release.

@@ -8,6 +8,10 @@ from __future__ import annotations
 
 from netgrip.core.model import Address, Interface
 
+# Effective resolvers shown in demo mode (as if read from resolv.conf).
+DEMO_DNS = ["192.168.1.1", "9.9.9.9"]
+DEMO_DNS_SEARCH = ["lan.example"]
+
 
 def demo_interfaces() -> list[Interface]:
     return [
@@ -20,9 +24,11 @@ def demo_interfaces() -> list[Interface]:
         ),
         Interface(
             name="eth0", index=2, kind="physical", state="up",
-            mac="52:54:00:a1:b2:c3", mtu=1500,
+            mac="52:54:00:a1:b2:c3", mtu=1500, alias="uplink",
+            gateway="192.168.1.1", gateway_dynamic=True,
             addresses=[
                 Address("192.168.1.10", 24, 4, dynamic=True),
+                Address("192.168.1.11", 24, 4),  # a second v4: now its own box
                 Address("2001:db8:1::10", 64, 6),
             ],
         ),
@@ -37,6 +43,7 @@ def demo_interfaces() -> list[Interface]:
         Interface(
             name="bond0", index=5, kind="bond", state="up",
             mac="52:54:00:a1:b2:c4", mtu=1500, bond_mode="802.3ad",
+            gateway="10.0.0.1",  # statically configured (not DHCP)
             addresses=[Address("10.0.0.5", 24, 4)],
         ),
         Interface(

@@ -7,6 +7,7 @@ to :meth:`Runner.run_privileged`, which executes it as one batch.
 
 from __future__ import annotations
 
+import ipaddress
 import re
 
 from netgrip.core.model import Interface
@@ -23,10 +24,31 @@ BOND_MODES = {
 }
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,15}$")  # IFNAMSIZ is 16 incl. NUL
+_MAC_RE = re.compile(r"^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$")
 
 
 def valid_link_name(name: str) -> bool:
     return bool(_NAME_RE.match(name)) and name not in (".", "..")
+
+
+def valid_mac(mac: str) -> bool:
+    """A unicast, locally-administrable MAC in xx:xx:xx:xx:xx:xx form.
+
+    Rejects multicast addresses (low bit of the first octet set), which the
+    kernel will not accept as a device address anyway.
+    """
+    if not _MAC_RE.match(mac):
+        return False
+    return int(mac.split(":", 1)[0], 16) & 1 == 0
+
+
+def valid_ipaddr(addr: str) -> bool:
+    """A bare IPv4 or IPv6 address (no prefix), e.g. a gateway or nameserver."""
+    try:
+        ipaddress.ip_address(addr)
+        return True
+    except ValueError:
+        return False
 
 
 def default_vlan_name(parent: str, vlan_id: int) -> str:
@@ -54,6 +76,56 @@ def plan_move_addresses(src: str, dst: str, cidrs: list[str]) -> list[list[str]]
 
 def plan_set_link(dev: str, up: bool) -> list[list[str]]:
     return [["ip", "link", "set", "dev", dev, "up" if up else "down"]]
+
+
+def plan_set_mac(dev: str, mac: str) -> list[list[str]]:
+    return [["ip", "link", "set", "dev", dev, "address", mac]]
+
+
+def plan_set_mtu(dev: str, mtu: int) -> list[list[str]]:
+    return [["ip", "link", "set", "dev", dev, "mtu", str(mtu)]]
+
+
+def plan_set_alias(dev: str, alias: str) -> list[list[str]]:
+    """Set (or, with an empty string, clear) the kernel ifalias label."""
+    return [["ip", "link", "set", "dev", dev, "alias", alias]]
+
+
+def plan_rename_link(dev: str, new_name: str, was_up: bool) -> list[list[str]]:
+    """Rename a link. The kernel only renames a device while it is down."""
+    plan = [
+        ["ip", "link", "set", "dev", dev, "down"],
+        ["ip", "link", "set", "dev", dev, "name", new_name],
+    ]
+    if was_up:
+        plan.append(["ip", "link", "set", "dev", new_name, "up"])
+    return plan
+
+
+def plan_set_gateway(dev: str, gateway: str) -> list[list[str]]:
+    """Point the default route at ``gateway`` via ``dev``.
+
+    `replace` adds the default route or updates it in place, so this works
+    whether or not a default route already exists.
+    """
+    return [["ip", "route", "replace", "default", "via", gateway, "dev", dev]]
+
+
+def plan_clear_gateway(dev: str) -> list[list[str]]:
+    return [["ip", "route", "del", "default", "dev", dev]]
+
+
+def plan_set_dns(dev: str, servers: list[str], search: list[str]) -> list[list[str]]:
+    """Set per-link DNS via systemd-resolved (resolvectl).
+
+    Runtime only and present only where systemd-resolved is; the UI offers this
+    just when ``HostState.can_edit_dns`` is true. Reboot-persistent, backend-
+    aware DNS is the 0.2 roadmap item.
+    """
+    plan = [["resolvectl", "dns", dev, *servers]]
+    if search:
+        plan.append(["resolvectl", "domain", dev, *search])
+    return plan
 
 
 def plan_create_vlan(parent: str, vlan_id: int, name: str | None = None) -> list[list[str]]:
