@@ -6,9 +6,10 @@ from __future__ import annotations
 
 from functools import partial
 
-from PySide6.QtCore import QPoint, QPointF, Qt
+from PySide6.QtCore import QPoint, QPointF, QSettings, Qt
 from PySide6.QtGui import QAction, QIcon, QKeySequence
 from PySide6.QtWidgets import (
+    QApplication,
     QComboBox,
     QInputDialog,
     QLabel,
@@ -25,6 +26,7 @@ from netgrip.core.model import GROUP_KINDS, HostState, Interface
 from netgrip.core.probe import probe, probe_dns
 from netgrip.core.runner import DemoRunner, LocalRunner, Runner, SSHRunner
 from netgrip.core.sshhosts import ssh_config_hosts
+from netgrip.ui import theme
 from netgrip.ui.canvas import Canvas
 from netgrip.ui.dialogs import (
     BondDialog,
@@ -114,10 +116,30 @@ class MainWindow(QMainWindow):
         )
         bar.addAction(self.loopback_action)
 
+        bar.addSeparator()
+        bar.addWidget(QLabel(" Theme: "))
+        self.theme_combo = QComboBox()
+        for label, value in (("System", "system"), ("Light", "light"), ("Dark", "dark")):
+            self.theme_combo.addItem(label, value)
+        saved = QSettings().value("theme", "system")
+        self.theme_combo.setCurrentIndex(
+            max(0, self.theme_combo.findData(saved if saved in
+                ("system", "light", "dark") else "system"))
+        )
+        self.theme_combo.activated.connect(self._theme_picked)
+        bar.addWidget(self.theme_combo)
+
         help_menu = self.menuBar().addMenu("&Help")
         about = QAction("About NetGrip", self)
         about.triggered.connect(self._about)
         help_menu.addAction(about)
+
+    def _theme_picked(self, index: int) -> None:
+        mode = self.theme_combo.itemData(index)
+        QSettings().setValue("theme", mode)
+        theme.apply_theme(QApplication.instance(), mode)
+        # Repaint the canvas (node colours) under the new scheme.
+        self.canvas.populate(self.state, self.loopback_action.isChecked())
 
     def _about(self) -> None:
         QMessageBox.about(

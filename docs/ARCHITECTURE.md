@@ -59,6 +59,7 @@ Design decisions worth knowing:
 
 | module | role |
 |---|---|
+| `theme.py` | light/dark scheme detection and every colour the canvas paints |
 | `items.py` | `BaseNode` (flat rectangle), `NicNode`, `GroupNode`, `VlanNode`, `IpNode`, `DnsNode`, `Edge` (straight line) |
 | `canvas.py` | scene population, tree auto-layout, drop-target detection, drafts |
 | `main_window.py` | host picker, context menus, gesture → plan → confirm → apply |
@@ -67,8 +68,11 @@ Design decisions worth knowing:
 
 Notes:
 
-- The visual language is deliberately flat: rectangles and straight lines.
-  Resist the urge to add gradients, curves or shadows.
+- The *network view* is deliberately flat: rectangles and straight lines, so
+  the topology reads at a glance. The *look*, though, follows the OS theme —
+  every colour comes from `ui/theme.py`, which resolves a light or dark scheme
+  (user override → platform `colorScheme()` → palette) and installs a matching
+  palette. Don't hardcode colours in `items.py`/`canvas.py`.
 - An `IpNode` is *one address* (one CIDR of one family on one interface, or a
   detached draft). One box per address means a single address drags to a new
   interface on its own; a box can also carry a free-form name the user gives

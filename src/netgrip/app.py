@@ -6,6 +6,7 @@ import argparse
 import signal
 import sys
 
+from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication
 
 import netgrip
@@ -31,8 +32,14 @@ def main(argv: list[str] | None = None) -> int:
 
     app = QApplication(sys.argv[:1])
     app.setApplicationName("netgrip")
+    app.setOrganizationName("netgrip")
     app.setApplicationDisplayName("NetGrip")
     app.setDesktopFileName("io.github.theyoungrossco.netgrip")
+
+    # Match the desktop's light/dark theme (or the user's saved override).
+    from netgrip.ui import theme
+    pref = QSettings().value("theme", "system")
+    theme.apply_theme(app, pref if pref in ("system", "light", "dark") else "system")
 
     # Let Ctrl-C in the launching terminal close the app.
     signal.signal(signal.SIGINT, signal.SIG_DFL)

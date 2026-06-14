@@ -5,11 +5,12 @@ drops of one box onto another.
 from __future__ import annotations
 
 from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QPainter
+from PySide6.QtGui import QPainter
 from PySide6.QtWidgets import QApplication, QGraphicsScene, QGraphicsView
 
 from netgrip.core import store
 from netgrip.core.model import HostState
+from netgrip.ui import theme
 from netgrip.ui.items import (
     BaseNode,
     DnsNode,
@@ -50,7 +51,7 @@ class Canvas(QGraphicsView):
         )
         self.setDragMode(QGraphicsView.DragMode.RubberBandDrag)
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
-        self.setBackgroundBrush(QColor("#fafafa"))
+        self.setBackgroundBrush(theme.background())
 
         self._state: HostState | None = None
         self._show_loopback = False
@@ -66,6 +67,7 @@ class Canvas(QGraphicsView):
         if show_loopback is not None:
             self._show_loopback = show_loopback
         self._state = state
+        self.setBackgroundBrush(theme.background())  # follow theme changes
         if state is not None and state.label != self._host_label:
             self._load_state_for(state.label)
         scene = self.scene()

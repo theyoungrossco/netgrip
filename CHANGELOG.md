@@ -20,12 +20,16 @@ adheres to [Semantic Versioning](https://semver.org/).
 - Interface **alias** (kernel `ifalias`) is read and shown on the box
 - Drafts, box positions and box names **persist to disk** (under
   `~/.local/share/netgrip/`) and are restored on the next launch
+- **Light/dark theming** — the canvas and window follow the OS colour scheme,
+  with a toolbar Theme selector (System / Light / Dark) remembered across runs
 - `AGENTS.md` contributor/agent guide (imported by `CLAUDE.md`)
 
 ### Changed
 
 - Dialogs report invalid input **inline** instead of opening a second dialog;
   no stacked modal popups anywhere (project rule)
+- Canvas colours now come from a central `ui/theme.py` instead of hardcoded
+  light-mode values
 
 ## [0.1.0] - 2026-06-12
 

@@ -12,14 +12,11 @@ from PySide6.QtWidgets import QApplication, QGraphicsItem, QGraphicsObject, QGra
 
 from netgrip.core.actions import BOND_MODES
 from netgrip.core.model import Address, Interface
+from netgrip.ui import theme
 
 PAD = 9.0
 MIN_W = 165.0
 MAX_TEXT_W = 240.0
-
-TEXT = QColor("#202830")
-TEXT_DIM = QColor("#4d5a66")
-EDGE_COLOR = QColor("#8a949e")
 
 _draft_ids = itertools.count(1)
 
@@ -83,12 +80,12 @@ class BaseNode(QGraphicsObject):
         painter.drawRect(rect)
 
         painter.setFont(self._title_font)
-        painter.setPen(QPen(TEXT))
+        painter.setPen(QPen(theme.text()))
         tm = QFontMetricsF(self._title_font)
         painter.drawText(QPointF(PAD, PAD + tm.ascent()), self._title)
 
         painter.setFont(self._line_font)
-        painter.setPen(QPen(TEXT_DIM))
+        painter.setPen(QPen(theme.text_dim()))
         lm = QFontMetricsF(self._line_font)
         y = PAD + self._title_h
         for line in self._lines:
@@ -101,7 +98,7 @@ class BaseNode(QGraphicsObject):
         pass
 
     def _paint_status_dot(self, painter, up: bool) -> None:
-        color = QColor("#2e9e4f") if up else QColor("#c34a3a")
+        color = theme.status(up)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(color)
         r = 4.0
@@ -152,8 +149,7 @@ class NicNode(BaseNode):
     """A network interface card (or other plain link, incl. loopback)."""
 
     def __init__(self, iface: Interface):
-        body = QColor("#e7eef5") if iface.kind != "loopback" else QColor("#ececec")
-        border = QColor("#46729c") if iface.kind != "loopback" else QColor("#9a9a9a")
+        body, border = theme.node("loopback" if iface.kind == "loopback" else "nic")
         super().__init__(iface.name, _iface_detail(iface), body, border)
         self.iface = iface
         self.key = f"if:{iface.name}"
@@ -177,7 +173,8 @@ class GroupNode(BaseNode):
         gw = _gateway_line(iface)
         if gw:
             lines.append(gw)
-        super().__init__(iface.name, lines, QColor("#f6e8d4"), QColor("#a8742f"))
+        body, border = theme.node("group")
+        super().__init__(iface.name, lines, body, border)
         self.iface = iface
         self.key = f"if:{iface.name}"
 
@@ -194,7 +191,8 @@ class VlanNode(BaseNode):
         gw = _gateway_line(iface)
         if gw:
             lines.append(gw)
-        super().__init__(title, lines, QColor("#dcefec"), QColor("#2f8a80"))
+        body, border = theme.node("vlan")
+        super().__init__(title, lines, body, border)
         self.iface = iface
         self.key = f"if:{iface.name}"
 
@@ -225,10 +223,7 @@ class IpNode(BaseNode):
         lines = [cidr + ("  (dhcp)" if dynamic else "")] if cidr else ["(no address)"]
         if alias:
             lines.append(family_label)  # keep the family visible behind the name
-        if family == 4:
-            body, border = QColor("#e0f0dc"), QColor("#3f8a44")
-        else:
-            body, border = QColor("#e9e2f6"), QColor("#6d51a8")
+        body, border = theme.ip_node(family)
         super().__init__(title, lines, body, border, dashed=self.is_draft)
         if parent_name:
             self.key = ip_key(parent_name, cidr)
@@ -262,7 +257,8 @@ class DnsNode(BaseNode):
         lines = list(servers) or ["(none)"]
         if search:
             lines.append("search " + " ".join(search))
-        super().__init__("DNS", lines, QColor("#eceef0"), QColor("#7a828a"))
+        body, border = theme.node("dns")
+        super().__init__("DNS", lines, body, border)
         self.key = "sys:dns"
 
 
@@ -272,7 +268,7 @@ class Edge(QGraphicsPathItem):
     def __init__(self, a: BaseNode, b: BaseNode):
         super().__init__()
         self.setZValue(0)
-        self.setPen(QPen(EDGE_COLOR, 1.4))
+        self.setPen(QPen(theme.edge(), 1.4))
         self._a = a
         self._b = b
         a.moved.connect(self.refresh)

@@ -41,9 +41,12 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full tour and
 3. **One batch per user action.** `Runner.run_privileged()` joins a plan with
    `&&` into a single `sh -c`, so escalation prompts at most once and a
    failing step aborts the rest. Keep a gesture's commands in one plan.
-4. **The UI stays flat.** Rectangles and straight, centre-to-centre lines. No
-   rounded corners, gradients, shadows, or bezier curves. This is a deliberate
-   "squares and lines", not "boxes and cables", aesthetic.
+4. **Flat *network view*, themed *look*.** "Flat" means the topology is drawn
+   plainly — interfaces as rectangles joined by straight, centre-to-centre
+   lines (not a node-editor with curved "cables"). It does **not** mean drab:
+   colours must come from `ui/theme.py` (palette-driven, light/dark aware) so
+   the canvas matches the OS theme. Never hardcode hex colours in items/canvas;
+   add them to `theme.py` instead.
 5. **A dialog never opens another dialog.** No stacked modals, ever. Report
    invalid input *inline* (see `dialogs._error_label`), not with a popup. The
    apply → confirm flow is fine because each input dialog has closed before the
@@ -74,7 +77,8 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full tour and
 
 **Add a canvas node type**
 1. Subclass `BaseNode` in `ui/items.py`; set a stable `.key` (used to
-   remember positions). Keep painting flat.
+   remember positions). Pull fill/border from `theme.node(...)` (add a new
+   entry to the light + dark tables in `ui/theme.py`), never a literal colour.
 2. Create the node and its `Edge` in `Canvas.populate` (`ui/canvas.py`).
 
 ## Where state lives

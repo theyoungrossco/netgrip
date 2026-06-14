@@ -34,6 +34,7 @@ from netgrip.core.actions import (
     valid_mac,
 )
 from netgrip.core.model import Interface
+from netgrip.ui import theme
 
 
 def _error_label() -> QLabel:
@@ -43,7 +44,7 @@ def _error_label() -> QLabel:
     invalid input is reported in-place here rather than via a popup.
     """
     label = QLabel()
-    label.setStyleSheet("color: #c34a3a;")
+    label.setStyleSheet(f"color: {theme.error().name()};")
     label.setWordWrap(True)
     return label
 
