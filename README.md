@@ -3,12 +3,12 @@
 **Visual, drag-and-drop network interface management for Linux.**
 
 NetGrip shows your machine's network as it actually is: NICs are boxes, and
-every piece of configuration — an IPv4 setup, an IPv6 setup, a VLAN, a bond —
-is its own box, joined to its interface by a line. Reconfiguring the network
-is direct manipulation:
+every piece of configuration — an IP address, a VLAN, a bond — is its own box,
+joined to its interface by a line. Reconfiguring the network is direct
+manipulation:
 
-- **Drag an IP box** from one NIC to another and the addresses move with it.
-- **Ctrl-drag** to clone a configuration instead of moving it.
+- **Drag an IP box** from one NIC to another and that address moves with it.
+- **Ctrl-drag** to clone an address instead of moving it.
 - **Drag one NIC onto another** to create a bond (failover, LACP, and the
   other kernel bonding modes).
 - **Right-click** a NIC to add a VLAN or an IP config; right-click a bond to
@@ -17,10 +17,15 @@ is direct manipulation:
   the canvas and attach somewhere else later.
 - Stack them: an IP config attached to a VLAN attached to a bond of two NICs.
 
+There's one box per IPv4/IPv6 address, and every interface shows its MAC, MTU,
+alias and default gateway. **Right-click → Properties** to edit a NIC/bond/VLAN's
+MAC, MTU, alias or name, or to set its gateway and DNS. System-wide DNS is drawn
+as a dashed frame around the whole diagram.
+
 It manages the local machine, or — using your existing SSH config, keys and
 agent — any remote Linux machine you can reach with `ssh`.
 
-![NetGrip showing two NICs bonded with LACP, a VLAN on the bond, and IP config boxes](docs/img/screenshot-demo.png)
+![NetGrip's demo host: two NICs bonded with LACP, a VLAN on the bond, per-address IPv4/IPv6 boxes with their gateways, and a system-wide DNS frame around everything](docs/img/screenshot-demo.png)
 
 ## How it works
 
@@ -33,6 +38,15 @@ what executes, locally via `sudo`/`pkexec` or remotely via `ssh`.
 > Changes are real and immediate, but they are **not persisted across
 > reboots** yet. Persistence backends (NetworkManager, systemd-networkd,
 > netplan) are on the [roadmap](ROADMAP.md).
+
+The canvas stays *flat* — boxes joined by straight lines — but follows your
+desktop's light or dark theme, with a toolbar **Theme** selector (System /
+Light / Dark) that's remembered between runs. The same demo host in dark mode:
+
+![NetGrip's demo host rendered in the dark theme](docs/img/screenshot-demo-dark.png)
+
+NetGrip also remembers, per host, where you place the boxes, the names you give
+IP-config boxes, and any draft configs — restored the next time you open it.
 
 ## Installing
 
@@ -89,13 +103,19 @@ single confirmed batch.
 
 ## Status
 
-Working today: viewing interfaces/addresses/VLANs/bonds/bridges, moving and
-cloning IP configs, creating and deleting VLANs, creating bonds by drag or
-dialog, bond mode and membership changes, link up/down, draft IP configs,
-remote hosts over SSH, demo mode.
+Working today: viewing interfaces/addresses/VLANs/bonds/bridges with their
+MAC, MTU, alias and gateway; one box per IPv4/IPv6 address; moving and cloning
+IP configs; creating and deleting VLANs; creating bonds by drag or dialog; bond
+mode and membership changes; link up/down; editing MAC/MTU/alias and renaming
+interfaces; setting the default gateway (with a Dynamic/Static toggle) and
+per-link DNS (via systemd-resolved); system-wide DNS read from
+`/etc/resolv.conf`; draft IP configs; light/dark theming; remembered box
+positions, names and drafts per host; remote hosts over SSH; demo mode. As
+noted above, all of this applies to the *running* stack only — reboot
+persistence is the headline of 0.2.
 
-See [ROADMAP.md](ROADMAP.md) for where this is going (persistence, routes
-and gateways, bridges/teams, Windows hosts) and
+See [ROADMAP.md](ROADMAP.md) for where this is going (persistence, more route
+control, bridges/teams, Windows hosts) and
 [CHANGELOG.md](CHANGELOG.md) for history.
 
 ## Contributing
