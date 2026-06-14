@@ -14,8 +14,9 @@ adheres to [Semantic Versioning](https://semver.org/).
   rename the interface
 - **Default gateway** per interface, shown on the box and editable with a
   Dynamic/Static toggle (Dynamic leaves a DHCP-assigned gateway untouched)
-- **DNS servers** read from `/etc/resolv.conf` and shown in a system DNS box;
-  settable per-link via `resolvectl` where systemd-resolved is present
+- **DNS servers** read from `/etc/resolv.conf` and shown as a dashed frame
+  around the whole diagram (DNS is system-wide); settable per-link via
+  `resolvectl` where systemd-resolved is present
 - Free-form **names** for IP-config boxes, shown as the box title
 - Interface **alias** (kernel `ifalias`) is read and shown on the box
 - Drafts, box positions and box names **persist to disk** (under

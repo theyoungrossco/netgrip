@@ -13,7 +13,7 @@ from netgrip.core.model import HostState
 from netgrip.ui import theme
 from netgrip.ui.items import (
     BaseNode,
-    DnsNode,
+    DnsFrame,
     Edge,
     GroupNode,
     IpNode,
@@ -133,13 +133,7 @@ class Canvas(QGraphicsView):
 
         roots.sort(key=root_rank)
 
-        # System DNS sits in its own grey box, unattached to any interface.
-        dns_node = DnsNode(state.dns, state.dns_search) if (state.dns or state.dns_search) else None
-
-        all_nodes: list[BaseNode] = [*if_nodes.values(), *ip_nodes, *draft_nodes]
-        if dns_node is not None:
-            all_nodes.append(dns_node)
-        for node in all_nodes:
+        for node in [*if_nodes.values(), *ip_nodes, *draft_nodes]:
             scene.addItem(node)
             node.drag_finished.connect(self._make_drop_handler(node))
             node.drag_finished.connect(self._save_state)
@@ -156,29 +150,28 @@ class Canvas(QGraphicsView):
         for ip_node in ip_nodes:
             scene.addItem(Edge(if_nodes[ip_node.parent_name], ip_node))
 
-        top = MARGIN
-        if dns_node is not None:
-            dns_node.setPos(MARGIN, MARGIN)  # top-left; tree starts below it
-            top = MARGIN + dns_node.boundingRect().height() + V_GAP
-        self._layout_tree(roots, children, if_nodes, top)
+        self._layout_tree(roots, children, if_nodes)
 
         for draft, node in zip(self._drafts, draft_nodes, strict=True):
             node.setPos(draft["pos"])
             node.moved.connect(self._make_draft_position_saver(draft, node))
 
         # Remembered positions win over the automatic layout.
-        restore = [*if_nodes.values(), *ip_nodes]
-        if dns_node is not None:
-            restore.append(dns_node)
-        for node in restore:
+        for node in [*if_nodes.values(), *ip_nodes]:
             if node.key in self._positions:
                 node.setPos(self._positions[node.key])
+
+        # DNS is system-wide: frame the applied topology (interfaces + their
+        # addresses) so it reads as "this applies to everything inside".
+        framed = [*if_nodes.values(), *ip_nodes]
+        if (state.dns or state.dns_search) and framed:
+            scene.addItem(DnsFrame(state.dns, state.dns_search, framed))
 
         rect = scene.itemsBoundingRect().adjusted(-MARGIN, -MARGIN, MARGIN, MARGIN)
         scene.setSceneRect(rect)
 
-    def _layout_tree(self, roots, children, if_nodes, top: float = MARGIN) -> None:
-        y = top
+    def _layout_tree(self, roots, children, if_nodes) -> None:
+        y = MARGIN
 
         def place(node: BaseNode, depth: int, top: float) -> float:
             """Position node and its subtree; return the subtree height."""

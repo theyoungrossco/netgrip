@@ -246,20 +246,83 @@ def new_draft_id() -> int:
     return next(_draft_ids)
 
 
-class DnsNode(BaseNode):
-    """The host's effective DNS resolvers (read from resolv.conf).
+class DnsFrame(QGraphicsObject):
+    """A dim, dashed frame drawn around the whole diagram, headed "DNS".
 
-    System-level and read-only here; per-link DNS is set from a link's
-    Properties dialog. Drawn as a neutral grey box, with no connecting lines.
+    The host's resolvers (read from resolv.conf) apply to every interface at
+    once and aren't something you attach or move, so DNS is drawn as the
+    boundary everything sits inside — not as a box you could drag onto one
+    link. It's a passive backdrop: behind everything, ignores mouse input, and
+    resizes to follow the nodes as they move.
     """
 
-    def __init__(self, servers: list[str], search: list[str]):
-        lines = list(servers) or ["(none)"]
+    OUTER_PAD = 24.0
+    HEADER_GAP = 8.0
+
+    def __init__(self, servers: list[str], search: list[str], nodes: list[BaseNode]):
+        super().__init__()
+        self.setZValue(-1)  # behind edges (0) and nodes (1)
+        self.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        self._nodes = list(nodes)
+
+        base = QApplication.font()
+        self._title_font = QFont(base)
+        self._title_font.setBold(True)
+        self._detail_font = QFont(base)
+        self._detail_font.setPointSizeF(max(7.0, base.pointSizeF() - 1.0))
+        self._title = "DNS"
+        detail = "  ".join(servers) if servers else "(none)"
         if search:
-            lines.append("search " + " ".join(search))
-        body, border = theme.node("dns")
-        super().__init__("DNS", lines, body, border)
-        self.key = "sys:dns"
+            detail += "    search " + " ".join(search)
+        self._detail = detail
+
+        self._rect = QRectF()
+        for node in self._nodes:
+            node.moved.connect(self.refresh)
+        self.refresh()
+
+    def refresh(self) -> None:
+        content = QRectF()
+        for node in self._nodes:
+            content = content.united(node.sceneBoundingRect())
+        if content.isNull():
+            new = QRectF()
+        else:
+            header = QFontMetricsF(self._title_font).height()
+            top_reserve = self.OUTER_PAD + header + self.HEADER_GAP
+            new = content.adjusted(
+                -self.OUTER_PAD, -top_reserve, self.OUTER_PAD, self.OUTER_PAD
+            )
+        if new != self._rect:
+            self.prepareGeometryChange()
+            self._rect = new
+            self.update()
+
+    def boundingRect(self) -> QRectF:
+        return self._rect.adjusted(-2, -2, 2, 2)
+
+    def paint(self, painter, option, widget=None) -> None:
+        if self._rect.isNull():
+            return
+        _, border = theme.node("dns")
+        pen = QPen(border, 1.3)
+        pen.setStyle(Qt.PenStyle.DashLine)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRect(self._rect)
+
+        x = self._rect.left() + 14
+        y = self._rect.top() + 6
+        tm = QFontMetricsF(self._title_font)
+        painter.setFont(self._title_font)
+        painter.setPen(QPen(theme.text()))
+        painter.drawText(QPointF(x, y + tm.ascent()), self._title)
+        painter.setFont(self._detail_font)
+        painter.setPen(QPen(theme.text_dim()))
+        painter.drawText(
+            QPointF(x + tm.horizontalAdvance(self._title) + 12, y + tm.ascent()),
+            self._detail,
+        )
 
 
 class Edge(QGraphicsPathItem):
