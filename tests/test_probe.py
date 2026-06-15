@@ -1,6 +1,12 @@
 """Parsing of `ip -details -json address show` output."""
 
-from netgrip.core.probe import parse_addr_json, parse_resolv_conf, parse_route_json
+from netgrip.core.model import Gateway
+from netgrip.core.probe import (
+    parse_addr_json,
+    parse_resolv_conf,
+    parse_resolvectl_links,
+    parse_route_json,
+)
 
 # Trimmed but structurally faithful iproute2 JSON for: loopback, a physical
 # NIC with DHCP v4 + global v6 + link-local v6, a VLAN, a bond and a member.
@@ -113,9 +119,26 @@ ROUTE_FIXTURE = [
 
 def test_parse_route_json_picks_default_gateways_and_dynamic_flag():
     gws = parse_route_json(ROUTE_FIXTURE)
-    assert gws["eth0"] == ("10.99.0.1", True)   # dhcp -> dynamic
-    assert gws["bond0"] == ("10.0.0.1", False)  # static -> not dynamic
+    assert gws["eth0"] == Gateway("10.99.0.1", True)   # dhcp -> dynamic
+    assert gws["bond0"] == Gateway("10.0.0.1", False)  # static -> not dynamic
     assert "tun0" not in gws  # default route without a gateway is ignored
+
+
+def test_parse_resolvectl_links_maps_link_to_servers():
+    # `resolvectl dns` output: a Global line, then one line per link.
+    text = (
+        "Global:\n"
+        "Link 2 (eth0): 192.168.1.1 2001:db8:1::1\n"
+        "Link 3 (wlan0):\n"
+    )
+    links = parse_resolvectl_links(text)
+    assert links == {"eth0": ["192.168.1.1", "2001:db8:1::1"], "wlan0": []}
+
+
+def test_parse_resolvectl_links_domains():
+    text = "Link 2 (eth0): lan.example ~corp.example\n"
+    # Routing-only ('~') markers are left for the caller to strip.
+    assert parse_resolvectl_links(text) == {"eth0": ["lan.example", "~corp.example"]}
 
 
 def test_parse_resolv_conf_servers_and_search():

@@ -33,7 +33,7 @@ from netgrip.core.actions import (
     valid_link_name,
     valid_mac,
 )
-from netgrip.core.model import Interface
+from netgrip.core.model import Interface, ip_family
 from netgrip.ui import theme
 
 
@@ -165,29 +165,23 @@ class IpConfigDialog(QDialog):
 
 
 class LinkPropertiesDialog(QDialog):
-    """Edit a link's MAC, MTU, alias, name, default gateway and DNS.
+    """Edit a link's name, MAC, MTU and alias.
 
-    Gateway and DNS each use a Dynamic/Static toggle: Dynamic leaves the
-    current (often DHCP-assigned) value alone, Static applies a custom one.
+    Gateway and DNS are per-family — a DHCP/RA lease hands them out per
+    protocol — so they live on the IPv4/IPv6 groups (see IpGroupDialog), not on
+    the link as a whole.
     """
 
-    def __init__(self, parent, iface: Interface, other_names: set[str],
-                 dns: list[str] | None = None, dns_search: list[str] | None = None,
-                 can_edit_dns: bool = False):
+    def __init__(self, parent, iface: Interface, other_names: set[str]):
         super().__init__(parent)
         self.setWindowTitle(f"{iface.name} properties")
         self._iface = iface
         self._others = other_names
-        self._dns_search = list(dns_search or [])
         # Results read by the caller after exec():
         self.new_name = iface.name
         self.mac = iface.mac
         self.mtu = iface.mtu
         self.link_alias = iface.alias
-        self.gateway_static = False
-        self.gateway = iface.gateway
-        self.dns_static = False
-        self.dns_servers: list[str] = list(dns or [])
 
         form = QFormLayout(self)
         self._name_edit = QLineEdit(iface.name)
@@ -202,22 +196,6 @@ class LinkPropertiesDialog(QDialog):
         self._alias_edit = QLineEdit(iface.alias)
         self._alias_edit.setPlaceholderText("optional label stored on the link")
         form.addRow("Alias:", self._alias_edit)
-
-        self._gw_field = DynamicStaticField(
-            current=iface.gateway, is_dynamic=iface.gateway_dynamic or not iface.gateway,
-            placeholder="e.g. 192.168.1.1",
-        )
-        form.addRow("Default gateway:", self._gw_field)
-        self._dns_field = DynamicStaticField(
-            current=" ".join(dns or []), is_dynamic=True,
-            placeholder="space-separated, e.g. 1.1.1.1 9.9.9.9",
-            allow_static=can_edit_dns,
-        )
-        form.addRow("DNS servers:", self._dns_field)
-        if not can_edit_dns:
-            hint = QLabel("Setting DNS needs systemd-resolved (full support in 0.2).")
-            hint.setStyleSheet("color: #777;")
-            form.addRow("", hint)
 
         self._error = _error_label()
         form.addRow(self._error)
@@ -243,31 +221,166 @@ class LinkPropertiesDialog(QDialog):
         if mac and not valid_mac(mac):
             self._error.setText("Enter a unicast MAC like 52:54:00:a1:b2:c3.")
             return
+        self.new_name = name
+        self.mac = mac or self._iface.mac  # blank means leave it unchanged
+        self.mtu = self._mtu_spin.value()
+        self.link_alias = self._alias_edit.text().strip()
+        self.accept()
 
+
+class IpGroupDialog(QDialog):
+    """Per-family settings for one interface: default gateway, DNS servers and
+    search domains — everything a DHCP/RA lease for this family hands out.
+
+    Gateway and DNS each use a Dynamic/Static toggle: Dynamic leaves the
+    current (often DHCP-assigned) value alone, Static applies a custom one.
+    """
+
+    def __init__(self, parent, iface: Interface, family: int, can_edit_dns: bool = False):
+        super().__init__(parent)
+        self.setWindowTitle(f"{iface.name} · IPv{family} settings")
+        self._iface = iface
+        self._family = family
+        gw = iface.gateway_for(family)
+        dyn_addr = next((a for a in iface.addresses_for(family) if a.dynamic), None)
+        # Results read by the caller after exec():
+        self.address_static = False
+        self.new_static_address = ""
+        self.gateway_static = False
+        self.gateway = gw.address if gw else ""
+        self.dns_static = False
+        self.dns_servers: list[str] = iface.dns_for(family)
+        self.dns_search: list[str] = list(iface.dns_search)
+
+        form = QFormLayout(self)
+        # Addressing: Dynamic (DHCP/RA) leaves the lease alone; Static adds a
+        # fixed address. Actually starting a DHCP client is the 0.2 backend, so
+        # only the Static path applies a change today.
+        self._addr_field = DynamicStaticField(
+            current=dyn_addr.cidr if dyn_addr else "",
+            is_dynamic=bool(dyn_addr),
+            placeholder="e.g. 192.168.1.20/24" if family == 4 else "e.g. 2001:db8::20/64",
+        )
+        form.addRow("Addressing:", self._addr_field)
+        addr_hint = QLabel(
+            "Static adds a fixed address; obtaining one via DHCP/RA needs the "
+            "0.2 backend."
+        )
+        addr_hint.setStyleSheet("color: #777;")
+        addr_hint.setWordWrap(True)
+        form.addRow("", addr_hint)
+        self._gw_field = DynamicStaticField(
+            current=gw.address if gw else "",
+            is_dynamic=(gw.dynamic if gw else True),
+            placeholder="e.g. 192.168.1.1" if family == 4 else "e.g. 2001:db8::1",
+        )
+        form.addRow("Default gateway:", self._gw_field)
+        self._dns_field = DynamicStaticField(
+            current=" ".join(iface.dns_for(family)), is_dynamic=True,
+            placeholder="space-separated, e.g. 1.1.1.1 9.9.9.9",
+            allow_static=can_edit_dns,
+        )
+        form.addRow("DNS servers:", self._dns_field)
+        self._search_edit = QLineEdit(" ".join(iface.dns_search))
+        self._search_edit.setEnabled(can_edit_dns)
+        self._search_edit.setPlaceholderText("space-separated, e.g. lan.example")
+        form.addRow("Search domains:", self._search_edit)
+        if not can_edit_dns:
+            hint = QLabel("Setting DNS needs systemd-resolved (full support in 0.2).")
+            hint.setStyleSheet("color: #777;")
+            form.addRow("", hint)
+
+        self._error = _error_label()
+        form.addRow(self._error)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self._accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+
+    def _accept(self) -> None:
+        new_static = ""
+        addr = self._addr_field.value()
+        if self._addr_field.is_static and addr:
+            try:
+                parsed = ipaddress.ip_interface(addr)
+            except ValueError:
+                self._error.setText(f"'{addr}' is not a valid address.")
+                return
+            if parsed.version != self._family:
+                self._error.setText(f"Enter an IPv{self._family} address (with prefix).")
+                return
+            new_static = parsed.with_prefixlen
         gw = self._gw_field.value()
-        if self._gw_field.is_static and gw and not valid_ipaddr(gw):
-            self._error.setText(f"'{gw}' is not a valid gateway address.")
-            return
+        if self._gw_field.is_static and gw:
+            if not valid_ipaddr(gw):
+                self._error.setText(f"'{gw}' is not a valid gateway address.")
+                return
+            if ip_family(gw) != self._family:
+                self._error.setText(f"The gateway must be an IPv{self._family} address.")
+                return
         servers = self._dns_field.value().split()
         if self._dns_field.is_static:
             bad = next((s for s in servers if not valid_ipaddr(s)), None)
             if bad:
                 self._error.setText(f"'{bad}' is not a valid DNS server address.")
                 return
-
-        self.new_name = name
-        self.mac = mac or self._iface.mac  # blank means leave it unchanged
-        self.mtu = self._mtu_spin.value()
-        self.link_alias = self._alias_edit.text().strip()
+        self.address_static = self._addr_field.is_static
+        self.new_static_address = new_static
         self.gateway_static = self._gw_field.is_static
         self.gateway = gw
         self.dns_static = self._dns_field.is_static
         self.dns_servers = servers
+        self.dns_search = self._search_edit.text().split()
         self.accept()
 
-    @property
-    def dns_search(self) -> list[str]:
-        return self._dns_search
+
+class ManualDnsDialog(QDialog):
+    """Edit the host-wide manual resolvers recorded for the System DNS box."""
+
+    def __init__(self, parent, servers: list[str]):
+        super().__init__(parent)
+        self.setWindowTitle("Manual DNS resolvers")
+        self.servers = list(servers)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("One resolver per line (host-wide extras):"))
+        self._edit = QPlainTextEdit("\n".join(servers))
+        self._edit.setMinimumWidth(320)
+        layout.addWidget(self._edit)
+        note = QLabel(
+            "Recorded here and shown with their provenance. Applying host-wide "
+            "DNS persistently is the 0.2 backend; per-link DNS is set from each "
+            "IPv4/IPv6 group."
+        )
+        note.setStyleSheet("color: #777;")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        self._error = _error_label()
+        layout.addWidget(self._error)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self._accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _accept(self) -> None:
+        out: list[str] = []
+        for raw in self._edit.toPlainText().splitlines():
+            server = raw.strip()
+            if not server:
+                continue
+            if not valid_ipaddr(server):
+                self._error.setText(f"'{server}' is not a valid IP address.")
+                return
+            if server not in out:
+                out.append(server)
+        self.servers = out
+        self.accept()
 
 
 class VlanDialog(QDialog):
@@ -311,6 +424,49 @@ class VlanDialog(QDialog):
         if self.name in self._existing:
             self._error.setText(f"'{self.name}' already exists.")
             return
+        self.accept()
+
+
+class DraftVlanDialog(QDialog):
+    """Id and optional name for a VLAN draft. The parent is not chosen here — it
+    is picked when the draft is dragged onto (or created on) a link."""
+
+    def __init__(self, parent, existing_names: set[str], vlan_id: int = 1, name: str = ""):
+        super().__init__(parent)
+        self.setWindowTitle("VLAN draft")
+        self._existing = existing_names
+        self.vlan_id = vlan_id
+        self.name = name
+
+        form = QFormLayout(self)
+        self._id_spin = QSpinBox()
+        self._id_spin.setRange(1, 4094)
+        self._id_spin.setValue(vlan_id)
+        form.addRow("VLAN id:", self._id_spin)
+        self._name_edit = QLineEdit(name)
+        self._name_edit.setPlaceholderText("optional — named after the parent on connect")
+        form.addRow("Interface name:", self._name_edit)
+        self._error = _error_label()
+        form.addRow(self._error)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self._accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+
+    def _accept(self) -> None:
+        self.vlan_id = self._id_spin.value()
+        name = self._name_edit.text().strip()
+        if name and not valid_link_name(name):
+            self._error.setText(
+                "Interface names are 1-15 characters: letters, digits, '.', '-', '_'."
+            )
+            return
+        if name and name in self._existing:
+            self._error.setText(f"'{name}' already exists.")
+            return
+        self.name = name
         self.accept()
 
 

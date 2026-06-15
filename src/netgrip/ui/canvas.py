@@ -13,11 +13,14 @@ from netgrip.core.model import HostState
 from netgrip.ui import theme
 from netgrip.ui.items import (
     BaseNode,
-    DnsFrame,
+    DraftVlanNode,
     Edge,
     GroupNode,
+    IpGroup,
     IpNode,
     NicNode,
+    RegionNode,
+    SystemDns,
     VlanNode,
     new_draft_id,
 )
@@ -29,7 +32,7 @@ def _alias_key(family: int, cidr: str) -> str:
     return f"{family}:{cidr}"
 
 MARGIN = 30.0
-COL_W = 270.0
+COL_W = 300.0
 V_GAP = 22.0
 # A drop only counts if the dragged box overlaps the target by this share
 # of its own area; less than that is treated as repositioning.
@@ -38,10 +41,13 @@ MIN_OVERLAP = 0.35
 
 class Canvas(QGraphicsView):
     node_menu_requested = Signal(object, QPoint)  # node, global pos
+    region_menu_requested = Signal(object, QPoint)  # RegionNode (IpGroup), global pos
     canvas_menu_requested = Signal(QPoint, QPointF)  # global pos, scene pos
-    ip_dropped = Signal(object, object, bool)  # IpNode, target node, clone?
+    ip_dropped = Signal(object, object, bool)  # IpNode, target (NIC/group/IpGroup), clone?
+    ip_detached = Signal(object)  # IpNode dragged clear of its own group
     nic_dropped = Signal(object, object)  # NicNode, target NicNode/GroupNode
     vlan_dropped = Signal(object, object)  # VlanNode, target node
+    draft_vlan_dropped = Signal(object, object)  # DraftVlanNode, parent link node
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -58,7 +64,9 @@ class Canvas(QGraphicsView):
         self._host_label: str | None = None  # whose persisted state is loaded
         self._positions: dict[str, QPointF] = {}  # remembered node positions
         self._drafts: list[dict] = []  # {id, family, cidr, pos}
+        self._draft_vlans: list[dict] = []  # {id, vlan_id, name, cidrs, pos}
         self._aliases: dict[str, str] = {}  # _alias_key() -> user box name
+        self._manual_dns: list[str] = []  # user-added host-wide resolvers
 
     # ------------------------------------------------------------------ #
     # population & layout
@@ -70,6 +78,8 @@ class Canvas(QGraphicsView):
         self.setBackgroundBrush(theme.background())  # follow theme changes
         if state is not None and state.label != self._host_label:
             self._load_state_for(state.label)
+        if state is not None:
+            state.manual_dns = list(self._manual_dns)  # for resolver provenance
         scene = self.scene()
         scene.clear()
         if state is None:
@@ -81,7 +91,7 @@ class Canvas(QGraphicsView):
         ]
         shown_names = {i.name for i in shown}
 
-        # Build one node per interface plus one IP box per family in use.
+        # One node per interface.
         if_nodes: dict[str, BaseNode] = {}
         for iface in shown:
             if iface.is_group:
@@ -92,11 +102,25 @@ class Canvas(QGraphicsView):
                 node = NicNode(iface)
             if_nodes[iface.name] = node
 
-        ip_nodes: list[IpNode] = []
+        # Each interface's addresses are grouped, per family, into an IpGroup
+        # region that also carries that family's gateway / DNS / search.
+        ip_nodes: list[IpNode] = []  # every member box (for save & positions)
+        ip_groups: list[IpGroup] = []
+        groups_by_iface: dict[str, list[IpGroup]] = {name: [] for name in if_nodes}
         for iface in shown:
-            for addr in iface.addresses:
-                alias = self._aliases.get(_alias_key(addr.family, addr.cidr), "")
-                ip_nodes.append(IpNode.from_address(addr, iface.name, alias=alias))
+            for family in iface.families():
+                members = [
+                    IpNode.from_address(
+                        addr, iface.name,
+                        alias=self._aliases.get(_alias_key(family, addr.cidr), ""),
+                    )
+                    for addr in iface.addresses_for(family)
+                    if not addr.dynamic  # DHCP/RA address shows in the group header
+                ]
+                group = IpGroup(iface, family, members)
+                ip_nodes.extend(members)
+                ip_groups.append(group)
+                groups_by_iface[iface.name].append(group)
 
         draft_nodes = [
             IpNode(
@@ -105,9 +129,14 @@ class Canvas(QGraphicsView):
             )
             for d in self._drafts
         ]
+        draft_vlan_nodes = [
+            DraftVlanNode(dv["id"], dv["vlan_id"], dv["name"], dv["cidrs"])
+            for dv in self._draft_vlans
+        ]
 
-        # Parent->children map drives both the edges and the tree layout.
-        children: dict[str, list[BaseNode]] = {name: [] for name in if_nodes}
+        # Parent->children map drives both the edges and the tree layout. An
+        # interface's IP groups sit nearest it (first), then subordinate links.
+        children: dict[str, list] = {name: [] for name in if_nodes}
         roots: list[BaseNode] = []
         for iface in shown:
             node = if_nodes[iface.name]
@@ -123,8 +152,8 @@ class Canvas(QGraphicsView):
                 roots.append(node)
             else:
                 roots.append(node)  # enslaved NICs still sit in the first column
-        for ip_node in ip_nodes:
-            children[ip_node.parent_name].append(ip_node)
+        for name in if_nodes:
+            children[name] = groups_by_iface[name] + children[name]
 
         # Order: physical NICs first, groups without members, loopback last.
         def root_rank(n: BaseNode) -> tuple:
@@ -133,50 +162,81 @@ class Canvas(QGraphicsView):
 
         roots.sort(key=root_rank)
 
-        for node in [*if_nodes.values(), *ip_nodes, *draft_nodes]:
+        for node in [*if_nodes.values(), *ip_nodes, *draft_nodes, *draft_vlan_nodes]:
             scene.addItem(node)
             node.drag_finished.connect(self._make_drop_handler(node))
             node.drag_finished.connect(self._save_state)
-            if node.key and not (isinstance(node, IpNode) and node.is_draft):
+            # Drafts remember their own position (in their draft record) below.
+            is_draft_box = (isinstance(node, IpNode) and node.is_draft) \
+                or isinstance(node, DraftVlanNode)
+            if node.key and not is_draft_box:
                 node.moved.connect(self._make_position_saver(node))
+        for group in ip_groups:
+            scene.addItem(group)
+            group.drag_finished.connect(self._save_state)
 
-        # Edges: vlan->parent, member->group, ip->owner.
+        # The host-wide resolvers, drawn as a plain box (not an enclosing frame).
+        dns_node: SystemDns | None = None
+        if state.dns or state.dns_search or self._manual_dns:
+            dns_node = SystemDns(
+                state.dns, state.dns_search, self._manual_dns, state.resolver_origin
+            )
+            scene.addItem(dns_node)
+            dns_node.drag_finished.connect(self._save_state)
+            dns_node.moved.connect(self._make_position_saver(dns_node))
+
+        # Edges: vlan->parent, member->group, interface->its IP groups.
         for iface in shown:
             node = if_nodes[iface.name]
             if iface.kind == "vlan" and iface.vlan_parent in if_nodes:
                 scene.addItem(Edge(if_nodes[iface.vlan_parent], node))
             if iface.master and iface.master in if_nodes:
                 scene.addItem(Edge(node, if_nodes[iface.master]))
-        for ip_node in ip_nodes:
-            scene.addItem(Edge(if_nodes[ip_node.parent_name], ip_node))
+        for group in ip_groups:
+            scene.addItem(Edge(if_nodes[group.iface.name], group))
 
-        self._layout_tree(roots, children, if_nodes)
+        # The DNS box is pinned at the top; the interface tree starts below it.
+        start_y = MARGIN
+        if dns_node is not None:
+            dns_node.setPos(MARGIN, MARGIN)
+            start_y = MARGIN + dns_node.boundingRect().height() + V_GAP
+        self._layout_tree(roots, children, start_y)
 
         for draft, node in zip(self._drafts, draft_nodes, strict=True):
             node.setPos(draft["pos"])
             node.moved.connect(self._make_draft_position_saver(draft, node))
+        for dv, node in zip(self._draft_vlans, draft_vlan_nodes, strict=True):
+            node.setPos(dv["pos"])
+            node.moved.connect(self._make_draft_position_saver(dv, node))
 
-        # Remembered positions win over the automatic layout.
-        for node in [*if_nodes.values(), *ip_nodes]:
+        # Remembered positions win over the automatic layout; members moving
+        # makes their group reflow around them.
+        remembered = [*if_nodes.values(), *ip_nodes]
+        if dns_node is not None:
+            remembered.append(dns_node)
+        for node in remembered:
             if node.key in self._positions:
                 node.setPos(self._positions[node.key])
 
-        # DNS is system-wide: frame the applied topology (interfaces + their
-        # addresses) so it reads as "this applies to everything inside".
-        framed = [*if_nodes.values(), *ip_nodes]
-        if (state.dns or state.dns_search) and framed:
-            scene.addItem(DnsFrame(state.dns, state.dns_search, framed))
+        # Member moves no longer auto-grow their frame (so an address can be
+        # dragged out), so wrap each group once here, after every member has its
+        # final position.
+        for group in ip_groups:
+            group.refresh()
 
         rect = scene.itemsBoundingRect().adjusted(-MARGIN, -MARGIN, MARGIN, MARGIN)
         scene.setSceneRect(rect)
 
-    def _layout_tree(self, roots, children, if_nodes) -> None:
-        y = MARGIN
+    def _layout_tree(self, roots, children, start_y: float = MARGIN) -> None:
+        y = start_y
 
-        def place(node: BaseNode, depth: int, top: float) -> float:
+        def place(node, depth: int, top: float) -> float:
             """Position node and its subtree; return the subtree height."""
-            kids = children.get(getattr(node, "iface", None) and node.iface.name, [])
             x = MARGIN + depth * COL_W
+            # An IP group is a leaf that arranges its own member boxes.
+            if isinstance(node, RegionNode):
+                return node.arrange(x, top)
+            kids = children.get(node.iface.name, [])
             if not kids:
                 node.setPos(x, top)
                 return node.boundingRect().height()
@@ -206,6 +266,7 @@ class Canvas(QGraphicsView):
             if isinstance(xy, (list, tuple)) and len(xy) == 2:
                 self._positions[key] = QPointF(float(xy[0]), float(xy[1]))
         self._aliases = {str(k): str(v) for k, v in data["aliases"].items()}
+        self._manual_dns = [str(s) for s in data.get("manual_dns", [])]
         self._drafts = []
         for d in data["drafts"]:
             try:
@@ -218,6 +279,19 @@ class Canvas(QGraphicsView):
                 })
             except (KeyError, TypeError, ValueError, IndexError):
                 continue  # skip any malformed draft, keep the rest
+        self._draft_vlans = []
+        for dv in data.get("draft_vlans", []):
+            try:
+                pos = dv["pos"]
+                self._draft_vlans.append({
+                    "id": new_draft_id(),
+                    "vlan_id": int(dv["vlan_id"]),
+                    "name": str(dv.get("name", "")),
+                    "cidrs": [str(c) for c in dv.get("cidrs", [])],
+                    "pos": QPointF(float(pos[0]), float(pos[1])),
+                })
+            except (KeyError, TypeError, ValueError, IndexError):
+                continue
 
     def _save_state(self) -> None:
         if self._host_label is None:
@@ -229,8 +303,20 @@ class Canvas(QGraphicsView):
                  "pos": [d["pos"].x(), d["pos"].y()]}
                 for d in self._drafts
             ],
+            "draft_vlans": [
+                {"vlan_id": dv["vlan_id"], "name": dv["name"], "cidrs": list(dv["cidrs"]),
+                 "pos": [dv["pos"].x(), dv["pos"].y()]}
+                for dv in self._draft_vlans
+            ],
             "aliases": dict(self._aliases),
+            "manual_dns": list(self._manual_dns),
         })
+
+    def set_manual_dns(self, servers: list[str]) -> None:
+        """Replace the user's host-wide manual resolvers and redraw."""
+        self._manual_dns = list(servers)
+        self._save_state()
+        self.populate(self._state)
 
     def set_ip_name(self, family: int, cidr: str, name: str) -> None:
         """Give (or, with an empty name, clear) a box's free-form label.
@@ -274,6 +360,53 @@ class Canvas(QGraphicsView):
         self.populate(self._state)
 
     # ------------------------------------------------------------------ #
+    # draft VLANs (a VLAN configured here, created on a parent later)
+    # ------------------------------------------------------------------ #
+    def add_draft_vlan(self, vlan_id: int, name: str, scene_pos: QPointF) -> None:
+        self._draft_vlans.append({
+            "id": new_draft_id(), "vlan_id": vlan_id, "name": name,
+            "cidrs": [], "pos": scene_pos,
+        })
+        self._save_state()
+        self.populate(self._state)
+
+    def update_draft_vlan(self, draft_id: int, vlan_id: int, name: str) -> None:
+        for dv in self._draft_vlans:
+            if dv["id"] == draft_id:
+                dv["vlan_id"] = vlan_id
+                dv["name"] = name
+        self._save_state()
+        self.populate(self._state)
+
+    def add_draft_vlan_address(self, draft_id: int, cidr: str) -> None:
+        for dv in self._draft_vlans:
+            if dv["id"] == draft_id and cidr not in dv["cidrs"]:
+                dv["cidrs"].append(cidr)
+        self._save_state()
+        self.populate(self._state)
+
+    def remove_draft_vlan_address(self, draft_id: int, cidr: str) -> None:
+        for dv in self._draft_vlans:
+            if dv["id"] == draft_id:
+                dv["cidrs"] = [c for c in dv["cidrs"] if c != cidr]
+        self._save_state()
+        self.populate(self._state)
+
+    def remove_draft_vlan(self, draft_id: int) -> None:
+        self._draft_vlans = [dv for dv in self._draft_vlans if dv["id"] != draft_id]
+        self._save_state()
+        self.populate(self._state)
+
+    def move_draft_to_vlan(self, ip_draft_id: int, cidr: str, vlan_draft_id: int) -> None:
+        """Fold a free IP draft into a draft VLAN's pending addresses."""
+        for dv in self._draft_vlans:
+            if dv["id"] == vlan_draft_id and cidr not in dv["cidrs"]:
+                dv["cidrs"].append(cidr)
+        self._drafts = [d for d in self._drafts if d["id"] != ip_draft_id]
+        self._save_state()
+        self.populate(self._state)
+
+    # ------------------------------------------------------------------ #
     # drop detection
     # ------------------------------------------------------------------ #
     def _make_drop_handler(self, node: BaseNode):
@@ -287,12 +420,7 @@ class Canvas(QGraphicsView):
 
     def _node_dropped(self, node: BaseNode) -> None:
         if isinstance(node, IpNode):
-            target = self._drop_target(node, (NicNode, GroupNode, VlanNode))
-            if target and target.iface.name != node.parent_name:
-                clone = bool(
-                    QApplication.keyboardModifiers() & Qt.KeyboardModifier.ControlModifier
-                )
-                self.ip_dropped.emit(node, target, clone)
+            self._ip_node_dropped(node)
         elif isinstance(node, VlanNode):
             target = self._drop_target(node, (NicNode, GroupNode))
             if target and target.iface.name != node.iface.vlan_parent:
@@ -307,13 +435,78 @@ class Canvas(QGraphicsView):
                 and target.iface.name != node.iface.name
             ):
                 self.nic_dropped.emit(node, target)
+        elif isinstance(node, DraftVlanNode):
+            target = self._drop_target(node, (NicNode, GroupNode))
+            if target is not None and self._can_parent_vlan(target):
+                self.draft_vlan_dropped.emit(node, target)
 
-    def _drop_target(self, node: BaseNode, kinds: tuple) -> BaseNode | None:
+    def _ip_node_dropped(self, node: IpNode) -> None:
+        """Resolve where an address box was dropped.
+
+        Dropping it on a family group's title bar (or on a link box) attaches
+        the address to that interface; dropping it clear of its own frame
+        detaches it to a draft; dropping it back in its own group leaves it.
+        """
+        ctrl = bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.ControlModifier)
+        # A free IP draft can be folded into a draft VLAN's pending addresses.
+        if node.is_draft:
+            vlan_draft = self._drop_target(node, (DraftVlanNode,))
+            if vlan_draft is not None:
+                self.move_draft_to_vlan(node.draft_id, node.cidr, vlan_draft.draft_id)
+                return
+        target = self._region_header_target(node) or self._drop_target(
+            node, (NicNode, GroupNode, VlanNode)
+        )
+        if target is not None:
+            if target.iface.name != node.parent_name:
+                self.ip_dropped.emit(node, target, ctrl)
+            return  # dropped on its own group/link: leave it in place
+        if not node.is_draft and self._left_own_region(node):
+            self.ip_detached.emit(node)
+
+    def _region_header_target(self, node: BaseNode):
+        """The Ip group whose title bar the dragged box overlaps most, if any."""
+        own = node.sceneBoundingRect()
+        best, best_area = None, 0.0
+        for item in self.scene().items():
+            if not isinstance(item, IpGroup):
+                continue
+            header = item.header_rect_scene()
+            if header.isNull():
+                continue
+            overlap = header.intersected(own)
+            area = overlap.width() * overlap.height()
+            if area > best_area:
+                best, best_area = item, area
+        return best if best_area > 0 else None
+
+    def _can_parent_vlan(self, target) -> bool:
+        """A VLAN can hang off a physical NIC or a bond/bridge/team, not a
+        loopback (or, for now, another VLAN)."""
+        iface = getattr(target, "iface", None)
+        return iface is not None and iface.kind in ("physical", "bond", "bridge", "team")
+
+    def _left_own_region(self, node: IpNode) -> bool:
+        """True if ``node`` no longer overlaps the frame of the group it belongs
+        to — i.e. it was dragged out and should detach to a draft."""
+        for item in self.scene().items():
+            if (
+                isinstance(item, IpGroup)
+                and item.iface.name == node.parent_name
+                and item.family == node.family
+            ):
+                return not item.frame_rect().intersects(node.sceneBoundingRect())
+        return True
+
+    def _drop_target(self, node: BaseNode, kinds: tuple):
+        # Overlap is measured against full bounding rects rather than colliding
+        # shapes, so an Ip group (whose interactive shape is only its header)
+        # still counts as a target across its whole framed area.
         own_rect = node.sceneBoundingRect()
         own_area = own_rect.width() * own_rect.height()
         best, best_area = None, 0.0
-        for item in node.collidingItems():
-            if not isinstance(item, kinds):
+        for item in self.scene().items():
+            if item is node or not isinstance(item, kinds):
                 continue
             overlap = item.sceneBoundingRect().intersected(own_rect)
             area = overlap.width() * overlap.height()
@@ -328,6 +521,12 @@ class Canvas(QGraphicsView):
     # ------------------------------------------------------------------ #
     def contextMenuEvent(self, event) -> None:
         item = self.itemAt(event.pos())
+        # A region only "owns" its header strip (its shape), so a right-click in
+        # the body falls through to the box under it or to the empty canvas.
+        if isinstance(item, RegionNode):
+            self.region_menu_requested.emit(item, event.globalPos())
+            event.accept()
+            return
         while item is not None and not isinstance(item, BaseNode):
             item = item.parentItem()
         if isinstance(item, BaseNode):

@@ -6,9 +6,11 @@ run) without root and without touching a real network stack.
 
 from __future__ import annotations
 
-from netgrip.core.model import Address, Interface
+from netgrip.core.model import Address, Gateway, Interface
 
-# Effective resolvers shown in demo mode (as if read from resolv.conf).
+# Effective resolvers shown in demo mode (as if read from resolv.conf). Each
+# also appears as a per-link resolver below, so the System DNS box can show its
+# provenance: 192.168.1.1 from eth0, 9.9.9.9 from bond0.
 DEMO_DNS = ["192.168.1.1", "9.9.9.9"]
 DEMO_DNS_SEARCH = ["lan.example"]
 
@@ -25,10 +27,16 @@ def demo_interfaces() -> list[Interface]:
         Interface(
             name="eth0", index=2, kind="physical", state="up",
             mac="52:54:00:a1:b2:c3", mtu=1500, alias="uplink",
-            gateway="192.168.1.1", gateway_dynamic=True,
+            # Separate IPv4 and IPv6 defaults, each in its own protocol box.
+            gateways={
+                4: Gateway("192.168.1.1", dynamic=True),
+                6: Gateway("2001:db8:1::1", dynamic=True),
+            },
+            dns=["192.168.1.1", "2001:db8:1::1"], dns_search=["lan.example"],
+            dns_dynamic=True,
             addresses=[
                 Address("192.168.1.10", 24, 4, dynamic=True),
-                Address("192.168.1.11", 24, 4),  # a second v4: now its own box
+                Address("192.168.1.11", 24, 4),  # a second v4: its own box in the group
                 Address("2001:db8:1::10", 64, 6),
             ],
         ),
@@ -43,7 +51,8 @@ def demo_interfaces() -> list[Interface]:
         Interface(
             name="bond0", index=5, kind="bond", state="up",
             mac="52:54:00:a1:b2:c4", mtu=1500, bond_mode="802.3ad",
-            gateway="10.0.0.1",  # statically configured (not DHCP)
+            gateways={4: Gateway("10.0.0.1")},  # statically configured (not DHCP)
+            dns=["9.9.9.9"],
             addresses=[Address("10.0.0.5", 24, 4)],
         ),
         Interface(

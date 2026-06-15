@@ -51,7 +51,9 @@ def load_host(label: str) -> dict:
     return {
         "positions": data.get("positions") or {},
         "drafts": data.get("drafts") or [],
+        "draft_vlans": data.get("draft_vlans") or [],
         "aliases": data.get("aliases") or {},
+        "manual_dns": data.get("manual_dns") or [],
     }
 
 
@@ -69,4 +71,7 @@ def save_host(label: str, data: dict) -> None:
 
 
 def _blank() -> dict:
-    return {"positions": {}, "drafts": [], "aliases": {}}
+    return {
+        "positions": {}, "drafts": [], "draft_vlans": [],
+        "aliases": {}, "manual_dns": [],
+    }

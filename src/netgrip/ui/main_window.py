@@ -22,20 +22,31 @@ from PySide6.QtWidgets import (
 import netgrip
 from netgrip.core import actions
 from netgrip.core.demo import DEMO_DNS, DEMO_DNS_SEARCH, demo_interfaces
-from netgrip.core.model import GROUP_KINDS, HostState, Interface
-from netgrip.core.probe import probe, probe_dns
+from netgrip.core.model import GROUP_KINDS, HostState, Interface, ip_family
+from netgrip.core.probe import apply_link_dns, probe, probe_dns
 from netgrip.core.runner import DemoRunner, LocalRunner, Runner, SSHRunner
 from netgrip.core.sshhosts import ssh_config_hosts
 from netgrip.ui import theme
 from netgrip.ui.canvas import Canvas
 from netgrip.ui.dialogs import (
     BondDialog,
+    DraftVlanDialog,
     IpConfigDialog,
+    IpGroupDialog,
     LinkPropertiesDialog,
+    ManualDnsDialog,
     VlanDialog,
     confirm_commands,
 )
-from netgrip.ui.items import GroupNode, IpNode, NicNode, VlanNode
+from netgrip.ui.items import (
+    DraftVlanNode,
+    GroupNode,
+    IpGroup,
+    IpNode,
+    NicNode,
+    SystemDns,
+    VlanNode,
+)
 from netgrip.ui.worker import run_in_background
 
 _LOCAL = "__local__"
@@ -57,9 +68,12 @@ class MainWindow(QMainWindow):
         self.canvas = Canvas(self)
         self.setCentralWidget(self.canvas)
         self.canvas.ip_dropped.connect(self._on_ip_dropped)
+        self.canvas.ip_detached.connect(self._detach_ip)
         self.canvas.nic_dropped.connect(self._on_nic_dropped)
         self.canvas.vlan_dropped.connect(self._on_vlan_dropped)
+        self.canvas.draft_vlan_dropped.connect(self._on_draft_vlan_dropped)
         self.canvas.node_menu_requested.connect(self._show_node_menu)
+        self.canvas.region_menu_requested.connect(self._show_region_menu)
         self.canvas.canvas_menu_requested.connect(self._show_canvas_menu)
 
         self._build_toolbar()
@@ -193,7 +207,8 @@ class MainWindow(QMainWindow):
 
         def work() -> tuple:
             interfaces = probe(runner)
-            servers, search, can_edit = probe_dns(runner)
+            servers, search, can_edit, per_link = probe_dns(runner)
+            apply_link_dns(interfaces, per_link)  # per-link DNS onto each group
             return interfaces, servers, search, can_edit
 
         run_in_background(
@@ -307,16 +322,44 @@ class MainWindow(QMainWindow):
         if not self.state:
             return
         menu = QMenu(self)
-        if isinstance(node, IpNode):
+        if isinstance(node, SystemDns):
+            self._fill_dns_menu(menu)
+        elif isinstance(node, IpNode):
             self._fill_ip_menu(menu, node)
         elif isinstance(node, GroupNode):
             self._fill_group_menu(menu, node.iface)
         elif isinstance(node, VlanNode):
             self._fill_vlan_menu(menu, node.iface)
+        elif isinstance(node, DraftVlanNode):
+            self._fill_draft_vlan_menu(menu, node)
         elif isinstance(node, NicNode):
             self._fill_nic_menu(menu, node.iface)
         if not menu.isEmpty():
             menu.exec(global_pos)
+
+    def _show_region_menu(self, group: IpGroup, global_pos: QPoint) -> None:
+        if not self.state:
+            return
+        iface, family = group.iface, group.family
+        menu = QMenu(self)
+        menu.addAction(
+            f"IPv{family} settings (gateway, DNS)…",
+            partial(self._ipgroup_settings_dialog, iface, family),
+        )
+        menu.addAction(
+            f"Add IPv{family} address…", partial(self._add_ip_dialog, iface.name, family)
+        )
+        if iface.gateway_for(family):
+            menu.addSeparator()
+            menu.addAction(
+                f"Clear IPv{family} gateway",
+                partial(self._apply, f"Clear IPv{family} gateway on {iface.name}",
+                        actions.plan_clear_gateway(iface.name, family)),
+            )
+        menu.exec(global_pos)
+
+    def _fill_dns_menu(self, menu: QMenu) -> None:
+        menu.addAction("Edit manual resolvers…", self._manual_dns_dialog)
 
     def _add_common_iface_items(self, menu: QMenu, iface: Interface) -> None:
         menu.addAction(
@@ -405,6 +448,41 @@ class MainWindow(QMainWindow):
                     actions.plan_delete_link(iface.name)),
         )
 
+    def _fill_draft_vlan_menu(self, menu: QMenu, node: DraftVlanNode) -> None:
+        parents = self._vlan_parents()
+        create = menu.addMenu("Create on")
+        create.setEnabled(bool(parents))
+        for iface in parents:
+            create.addAction(
+                iface.name, partial(self._instantiate_draft_vlan, node, iface.name)
+            )
+        menu.addAction(
+            "Add IPv4 address…", partial(self._add_draft_vlan_address, node, 4)
+        )
+        menu.addAction(
+            "Add IPv6 address…", partial(self._add_draft_vlan_address, node, 6)
+        )
+        if node.cidrs:
+            remove = menu.addMenu("Remove address")
+            for cidr in node.cidrs:
+                remove.addAction(
+                    cidr, partial(self.canvas.remove_draft_vlan_address, node.draft_id, cidr)
+                )
+        menu.addAction("Edit VLAN…", partial(self._edit_draft_vlan_dialog, node))
+        menu.addSeparator()
+        menu.addAction(
+            "Delete draft", partial(self.canvas.remove_draft_vlan, node.draft_id)
+        )
+
+    def _vlan_parents(self) -> list[Interface]:
+        """Links a VLAN can be created on: a free physical NIC or a group."""
+        if not self.state:
+            return []
+        return [
+            i for i in self.state.interfaces
+            if i.master is None and i.kind in ("physical", "bond", "bridge", "team")
+        ]
+
     def _fill_ip_menu(self, menu: QMenu, node: IpNode) -> None:
         if node.is_draft:
             attach = menu.addMenu("Attach to")
@@ -462,6 +540,9 @@ class MainWindow(QMainWindow):
         menu.addAction(
             "New IPv6 config (draft)…", partial(self._new_draft_dialog, 6, scene_pos)
         )
+        menu.addAction(
+            "New VLAN (draft)…", partial(self._new_vlan_draft_dialog, scene_pos)
+        )
         menu.addSeparator()
         menu.addAction("Refresh", self.refresh)
         menu.addAction("Auto-layout", self.canvas.auto_layout)
@@ -510,6 +591,42 @@ class MainWindow(QMainWindow):
         if dialog.exec():
             self.canvas.add_draft(family, dialog.cidr, scene_pos, name=dialog.name)
 
+    def _new_vlan_draft_dialog(self, scene_pos: QPointF) -> None:
+        existing = self.state.link_names() if self.state else set()
+        dialog = DraftVlanDialog(self, existing)
+        if dialog.exec():
+            self.canvas.add_draft_vlan(dialog.vlan_id, dialog.name, scene_pos)
+
+    def _edit_draft_vlan_dialog(self, node: DraftVlanNode) -> None:
+        existing = self.state.link_names() if self.state else set()
+        dialog = DraftVlanDialog(self, existing, vlan_id=node.vlan_id, name=node.name)
+        if dialog.exec():
+            self.canvas.update_draft_vlan(node.draft_id, dialog.vlan_id, dialog.name)
+
+    def _add_draft_vlan_address(self, node: DraftVlanNode, family: int) -> None:
+        dialog = IpConfigDialog(
+            self, family, title=f"Add IPv{family} address to VLAN draft"
+        )
+        if dialog.exec():
+            self.canvas.add_draft_vlan_address(node.draft_id, dialog.cidr)
+
+    def _on_draft_vlan_dropped(self, node: DraftVlanNode, target) -> None:
+        self._instantiate_draft_vlan(node, target.iface.name)
+
+    def _instantiate_draft_vlan(self, node: DraftVlanNode, parent_name: str) -> None:
+        vlan_id = node.vlan_id
+        name = node.name or actions.default_vlan_name(parent_name, vlan_id)
+        cidrs = list(node.cidrs)
+        draft_id = node.draft_id
+        plan = actions.plan_create_vlan(parent_name, vlan_id, name)
+        if cidrs:
+            plan += actions.plan_add_addresses(name, cidrs)
+        self._apply(
+            f"Create VLAN {vlan_id} on {parent_name}",
+            plan,
+            on_success=lambda: self.canvas.remove_draft_vlan(draft_id),
+        )
+
     def _name_ip_dialog(self, node: IpNode) -> None:
         text, ok = QInputDialog.getText(
             self, "Name this address", "Name (blank to clear):", text=node.alias
@@ -540,11 +657,7 @@ class MainWindow(QMainWindow):
         if not self.state:
             return
         others = self.state.link_names() - {iface.name}
-        dlg = LinkPropertiesDialog(
-            self, iface, others,
-            dns=self.state.dns, dns_search=self.state.dns_search,
-            can_edit_dns=self.state.can_edit_dns,
-        )
+        dlg = LinkPropertiesDialog(self, iface, others)
         if not dlg.exec():
             return
         plan: list[list[str]] = []
@@ -559,19 +672,49 @@ class MainWindow(QMainWindow):
         if dlg.link_alias != iface.alias:
             plan += actions.plan_set_alias(iface.name, dlg.link_alias)
             changed.append("alias")
-        # Gateway/DNS only when Static is chosen; Dynamic leaves DHCP alone.
-        if dlg.gateway_static:
-            if dlg.gateway and dlg.gateway != iface.gateway:
-                plan += actions.plan_set_gateway(iface.name, dlg.gateway)
-                changed.append("gateway")
-            elif not dlg.gateway and iface.gateway:
-                plan += actions.plan_clear_gateway(iface.name)
-                changed.append("gateway")
-        if dlg.dns_static and dlg.dns_servers != self.state.dns:
-            plan += actions.plan_set_dns(iface.name, dlg.dns_servers, dlg.dns_search)
-            changed.append("DNS")
         if dlg.new_name != iface.name:
             plan += actions.plan_rename_link(iface.name, dlg.new_name, iface.is_up)
             changed.append("name")
         if plan:
             self._apply(f"Update {iface.name} ({', '.join(changed)})", plan)
+
+    def _ipgroup_settings_dialog(self, iface: Interface, family: int) -> None:
+        if not self.state:
+            return
+        dlg = IpGroupDialog(self, iface, family, can_edit_dns=self.state.can_edit_dns)
+        if not dlg.exec():
+            return
+        plan: list[list[str]] = []
+        changed: list[str] = []
+        # A Static address typed in the Addressing field is added (if new).
+        if dlg.new_static_address and not any(
+            a.cidr == dlg.new_static_address for a in iface.addresses
+        ):
+            plan += actions.plan_add_addresses(iface.name, [dlg.new_static_address])
+            changed.append("address")
+        # Gateway only when Static is chosen; Dynamic leaves the lease alone.
+        if dlg.gateway_static:
+            current = iface.gateway_for(family)
+            current_addr = current.address if current else ""
+            if dlg.gateway and dlg.gateway != current_addr:
+                plan += actions.plan_set_gateway(iface.name, dlg.gateway, family)
+                changed.append("gateway")
+            elif not dlg.gateway and current:
+                plan += actions.plan_clear_gateway(iface.name, family)
+                changed.append("gateway")
+        # DNS is per-link: keep the other family's servers when setting this one.
+        if dlg.dns_static:
+            other = [s for s in iface.dns if ip_family(s) != family]
+            combined = other + dlg.dns_servers
+            if combined != iface.dns or dlg.dns_search != iface.dns_search:
+                plan += actions.plan_set_dns(iface.name, combined, dlg.dns_search)
+                changed.append("DNS")
+        if plan:
+            self._apply(f"Update {iface.name} IPv{family} ({', '.join(changed)})", plan)
+
+    def _manual_dns_dialog(self) -> None:
+        if not self.state:
+            return
+        dlg = ManualDnsDialog(self, self.state.manual_dns)
+        if dlg.exec():
+            self.canvas.set_manual_dns(dlg.servers)

@@ -15,17 +15,24 @@ manipulation:
   change its mode or membership.
 - **Detach** an IP config and it becomes a floating *draft* you can park on
   the canvas and attach somewhere else later.
+- **Right-click the canvas** to start a *draft VLAN*: give it an id, a name and
+  addresses, then drag it onto a parent NIC or bond to create it for real.
 - Stack them: an IP config attached to a VLAN attached to a bond of two NICs.
 
-There's one box per IPv4/IPv6 address, and every interface shows its MAC, MTU,
-alias and default gateway. **Right-click → Properties** to edit a NIC/bond/VLAN's
-MAC, MTU, alias or name, or to set its gateway and DNS. System-wide DNS is drawn
-as a dashed frame around the whole diagram.
+An interface's addresses are grouped, per protocol, into an **IPv4** or **IPv6**
+box — the bucket a DHCP/RA lease fills — that carries that family's DHCP-assigned
+address, gateway, DNS servers and search domains in its header. Inside sit one box
+per *static* address: drag one clear of the frame to detach it to a draft, or drop
+one onto a header to attach it to that interface.
+**Right-click an interface → Properties** edits its MAC, MTU, alias or name;
+**right-click an IPv4/IPv6 header** edits that family's addressing, gateway and DNS. Host-wide
+DNS is its own **System DNS** box that shows where each resolver comes from, with
+room to add your own.
 
 It manages the local machine, or — using your existing SSH config, keys and
 agent — any remote Linux machine you can reach with `ssh`.
 
-![NetGrip's demo host: two NICs bonded with LACP, a VLAN on the bond, per-address IPv4/IPv6 boxes with their gateways, and a system-wide DNS frame around everything](docs/img/screenshot-demo.png)
+![NetGrip's demo host: two NICs bonded with LACP, a VLAN on the bond, per-family IPv4/IPv6 group boxes carrying their gateway and DNS, and a System DNS box listing where each resolver comes from](docs/img/screenshot-demo.png)
 
 ## How it works
 
@@ -102,15 +109,17 @@ single confirmed batch.
 ## Status
 
 Working today: viewing interfaces/addresses/VLANs/bonds/bridges with their
-MAC, MTU, alias and gateway; one box per IPv4/IPv6 address; moving and cloning
-IP configs; creating and deleting VLANs; creating bonds by drag or dialog; bond
-mode and membership changes; link up/down; editing MAC/MTU/alias and renaming
-interfaces; setting the default gateway (with a Dynamic/Static toggle) and
-per-link DNS (via systemd-resolved); system-wide DNS read from
-`/etc/resolv.conf`; draft IP configs; light/dark theming; remembered box
-positions, names and drafts per host; remote hosts over SSH; demo mode. As
-noted above, all of this applies to the *running* stack only — it isn't yet
-persisted across reboots.
+MAC, MTU and alias; addresses grouped per protocol into IPv4/IPv6 boxes that
+carry that family's gateway, DNS and search; moving and cloning IP configs
+(drag between interfaces or drop into a group to attach); creating and deleting
+VLANs; creating bonds by drag or dialog; bond mode and membership changes; link
+up/down; editing MAC/MTU/alias and renaming interfaces; setting the per-family
+default gateway (with a Dynamic/Static toggle) and per-link DNS (via
+systemd-resolved); a host-wide System DNS box that reads `/etc/resolv.conf` and
+shows where each resolver comes from; draft IP configs; light/dark theming;
+remembered box positions, names and drafts per host; remote hosts over SSH;
+demo mode. As noted above, all of this applies to the *running* stack only — it
+isn't yet persisted across reboots.
 
 See [ROADMAP.md](ROADMAP.md) for what's planned next and
 [CHANGELOG.md](CHANGELOG.md) for history.

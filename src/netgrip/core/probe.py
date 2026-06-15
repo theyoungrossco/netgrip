@@ -3,18 +3,33 @@
 from __future__ import annotations
 
 import json
+import re
 
-from netgrip.core.model import Address, Interface
+from netgrip.core.model import Address, Gateway, Interface
 from netgrip.core.runner import Runner
 
 PROBE_COMMAND = ["ip", "-details", "-json", "address", "show"]
-ROUTE_COMMAND = ["ip", "-json", "route", "show"]
-# One round trip for DNS: capability marker on line 1, resolv.conf after it.
+# Default routes are read per family so an interface can carry both an IPv4 and
+# an IPv6 default at once (each belongs to its own protocol box).
+ROUTE_COMMANDS = {
+    4: ["ip", "-json", "-4", "route", "show", "default"],
+    6: ["ip", "-json", "-6", "route", "show", "default"],
+}
+# One round trip for DNS: capability marker, then resolv.conf (the effective,
+# host-wide list), then resolvectl's per-link servers and search domains so we
+# can show where each resolver comes from. Sections are separated by markers.
+_LINKDNS = "@@LINKDNS@@"
+_LINKDOMAIN = "@@LINKDOMAIN@@"
 DNS_COMMAND = [
     "sh", "-c",
     "command -v resolvectl >/dev/null 2>&1 && echo yes || echo no; "
-    "cat /etc/resolv.conf 2>/dev/null",
+    "cat /etc/resolv.conf 2>/dev/null; "
+    f"echo {_LINKDNS}; resolvectl dns 2>/dev/null; "
+    f"echo {_LINKDOMAIN}; resolvectl domain 2>/dev/null",
 ]
+
+# `resolvectl dns` / `domain` print one line per link: "Link 2 (eth0): a b c".
+_RESOLVECTL_LINK_RE = re.compile(r"^Link\s+\d+\s+\(([^)]+)\):\s*(.*)$")
 
 # Routing protocols that mean "the kernel/DHCP/RA put this here", not the user.
 _DYNAMIC_PROTOCOLS = {"dhcp", "ra", "redirect", "kernel"}
@@ -34,36 +49,71 @@ def probe(runner: Runner) -> list[Interface]:
     return interfaces
 
 
-def probe_dns(runner: Runner) -> tuple[list[str], list[str], bool]:
-    """Return (nameservers, search domains, can_edit_dns).
+def probe_dns(
+    runner: Runner,
+) -> tuple[list[str], list[str], bool, dict[str, tuple[list[str], list[str]]]]:
+    """Return (effective nameservers, search domains, can_edit_dns, per-link).
+
+    ``per-link`` maps an interface name to ``(servers, search)`` as configured
+    on that link via systemd-resolved; it is empty on hosts without resolvectl.
 
     Best-effort: a host without resolv.conf or one we can't read just yields
-    empty lists, never an error — DNS visibility is a convenience.
+    empty values, never an error — DNS visibility is a convenience.
     """
     try:
         out = runner.run(DNS_COMMAND)
     except (RuntimeError, ValueError):
-        return [], [], False
-    lines = out.splitlines()
+        return [], [], False, {}
+    resolv_part, _, rest = out.partition(_LINKDNS)
+    linkdns_part, _, linkdomain_part = rest.partition(_LINKDOMAIN)
+    lines = resolv_part.splitlines()
     can_edit = bool(lines) and lines[0].strip() == "yes"
     servers, search = parse_resolv_conf("\n".join(lines[1:]))
-    return servers, search, can_edit
+    link_dns = parse_resolvectl_links(linkdns_part)
+    link_domain = parse_resolvectl_links(linkdomain_part)
+    per_link = {
+        name: (link_dns.get(name, []), link_domain.get(name, []))
+        for name in set(link_dns) | set(link_domain)
+    }
+    return servers, search, can_edit, per_link
+
+
+def apply_link_dns(
+    interfaces: list[Interface], per_link: dict[str, tuple[list[str], list[str]]]
+) -> None:
+    """Attach per-link DNS (from :func:`probe_dns`) onto the interfaces.
+
+    The "(dhcp)" tag is heuristic: resolvectl does not report whether a link's
+    DNS was learned dynamically, so we treat it as dynamic when the link also
+    carries a dynamic address or default route — the usual DHCP/RA case.
+    """
+    for iface in interfaces:
+        servers, search = per_link.get(iface.name, ([], []))
+        iface.dns = list(servers)
+        # A leading '~' marks a routing-only domain in resolvectl; drop it.
+        iface.dns_search = [d.lstrip("~") for d in search]
+        iface.dns_dynamic = bool(servers) and (
+            any(a.dynamic for a in iface.addresses)
+            or any(g.dynamic for g in iface.gateways.values())
+        )
 
 
 def _enrich_gateways(runner: Runner, interfaces: list[Interface]) -> None:
-    try:
-        routes = json.loads(runner.run(ROUTE_COMMAND))
-    except (RuntimeError, ValueError):
-        return  # routing info is a bonus; never fail the probe over it
-    gateways = parse_route_json(routes)
-    for iface in interfaces:
-        if iface.name in gateways:
-            iface.gateway, iface.gateway_dynamic = gateways[iface.name]
+    by_name = {i.name: i for i in interfaces}
+    for family, command in ROUTE_COMMANDS.items():
+        try:
+            routes = json.loads(runner.run(command))
+        except (RuntimeError, ValueError):
+            continue  # routing info is a bonus; never fail the probe over it
+        for dev, gateway in parse_route_json(routes).items():
+            iface = by_name.get(dev)
+            if iface is not None:
+                iface.gateways[family] = gateway
 
 
-def parse_route_json(payload: list[dict]) -> dict[str, tuple[str, bool]]:
-    """Map dev -> (default gateway, is_dynamic) from `ip -json route show`."""
-    gateways: dict[str, tuple[str, bool]] = {}
+def parse_route_json(payload: list[dict]) -> dict[str, Gateway]:
+    """Map dev -> default `Gateway` from one family's `ip -json route show`."""
+    gateways: dict[str, Gateway] = {}
     for route in payload:
         if route.get("dst") != "default":
             continue
@@ -71,8 +121,18 @@ def parse_route_json(payload: list[dict]) -> dict[str, tuple[str, bool]]:
         if not gw or not dev or dev in gateways:
             continue
         dynamic = route.get("protocol") in _DYNAMIC_PROTOCOLS
-        gateways[dev] = (gw, dynamic)
+        gateways[dev] = Gateway(gw, dynamic)
     return gateways
+
+
+def parse_resolvectl_links(text: str) -> dict[str, list[str]]:
+    """Parse `resolvectl dns` / `resolvectl domain` into {link: [values]}."""
+    links: dict[str, list[str]] = {}
+    for raw in text.splitlines():
+        match = _RESOLVECTL_LINK_RE.match(raw.strip())
+        if match:
+            links[match.group(1)] = match.group(2).split()
+    return links
 
 
 def parse_resolv_conf(text: str) -> tuple[list[str], list[str]]:

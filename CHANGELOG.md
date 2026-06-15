@@ -6,7 +6,44 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+
+- Addresses are now grouped, per protocol, into an **IPv4 / IPv6 box** that
+  carries that family's gateway, DNS servers and search domains in a clickable
+  header. The individual address boxes sit inside it and still drag, clone and
+  detach independently; dropping an address into a group attaches it to that
+  interface. Right-click the header to edit the family's gateway and DNS.
+- **Default gateway and DNS are per-family**, not per-interface: an interface
+  can show both an IPv4 and an IPv6 default at once, and a v4 change no longer
+  disturbs the v6 default (and vice versa). Gateway/DNS moved off the link
+  **Properties** dialog into the IPv4/IPv6 group settings.
+- System-wide DNS is now a **System DNS box** at the top instead of a frame
+  enclosing the whole diagram (which intercepted clicks meant for the canvas).
+  It lists each effective resolver with **where it comes from** (the interface
+  that supplied it, "manual", or "system") and takes manually added resolvers.
+- A **DHCP/RA-assigned address now sits in its IPv4/IPv6 group header** (the
+  "global" section, alongside the lease's gateway and DNS); only **static**
+  addresses are drawn as their own boxes inside the frame. Those boxes are now
+  titled **"v4 address" / "v6 address"** so the per-address box reads
+  differently from the protocol group it sits in.
+- Dragging an address **out of its group no longer stretches the frame** to
+  follow it: the frame stays put, so leaving it reads as a detach. Dropping the
+  box on another group's **title bar** attaches it there; dropping it clear of
+  every group detaches it to a draft.
+
+### Added
+
+- Per-link DNS read via `resolvectl` for resolver provenance, bucketed into the
+  IPv4/IPv6 group it belongs to.
+- Manually added host-wide resolvers, persisted per host and shown in the
+  System DNS box.
+- **Addressing** Dynamic/Static selector in the IPv4/IPv6 group settings: Static
+  adds a fixed address; obtaining one via DHCP/RA is flagged as the 0.2 backend.
+- **Draft VLANs**: right-click the canvas to create a VLAN that does not exist
+  yet, give it an id, a name and addresses, then drag it onto a parent NIC or
+  bond (or use its menu) to create it — addresses and all — in one batch. A free
+  IP draft can be folded into a draft VLAN's pending addresses. Draft VLANs
+  persist per host like other drafts.
 
 ## [0.1.0] - 2026-06-14
 

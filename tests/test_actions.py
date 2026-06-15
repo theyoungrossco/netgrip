@@ -114,12 +114,19 @@ def test_ipaddr_validation():
 
 
 def test_gateway_plans():
-    # `replace` so it works whether or not a default route already exists.
-    assert actions.plan_set_gateway("eth0", "192.168.1.1") == [
-        ["ip", "route", "replace", "default", "via", "192.168.1.1", "dev", "eth0"]
+    # `replace` so it works whether or not a default route already exists; the
+    # family flag keeps a v4 change from disturbing the v6 default.
+    assert actions.plan_set_gateway("eth0", "192.168.1.1", 4) == [
+        ["ip", "-4", "route", "replace", "default", "via", "192.168.1.1", "dev", "eth0"]
     ]
-    assert actions.plan_clear_gateway("eth0") == [
-        ["ip", "route", "del", "default", "dev", "eth0"]
+    assert actions.plan_set_gateway("eth0", "2001:db8::1", 6) == [
+        ["ip", "-6", "route", "replace", "default", "via", "2001:db8::1", "dev", "eth0"]
+    ]
+    assert actions.plan_clear_gateway("eth0", 4) == [
+        ["ip", "-4", "route", "del", "default", "dev", "eth0"]
+    ]
+    assert actions.plan_clear_gateway("eth0", 6) == [
+        ["ip", "-6", "route", "del", "default", "dev", "eth0"]
     ]
 
 

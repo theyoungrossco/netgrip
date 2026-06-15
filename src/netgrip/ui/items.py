@@ -121,13 +121,9 @@ class BaseNode(QGraphicsObject):
         self._press_pos = None
 
 
-def _gateway_line(iface: Interface) -> str | None:
-    if not iface.gateway:
-        return None
-    return f"via {iface.gateway}" + ("  (dhcp)" if iface.gateway_dynamic else "")
-
-
 def _iface_detail(iface: Interface) -> list[str]:
+    # Gateway and DNS no longer live here: they belong to the per-family IP
+    # group (see IpGroup), since that's the protocol that hands them out.
     lines = []
     if iface.alias:
         lines.append(iface.alias)
@@ -135,13 +131,29 @@ def _iface_detail(iface: Interface) -> list[str]:
         lines.append(f"{iface.mac}   mtu {iface.mtu}")
     else:
         lines.append(f"mtu {iface.mtu}")
-    gw = _gateway_line(iface)
-    if gw:
-        lines.append(gw)
     if iface.master:
         lines.append(f"member of {iface.master}")
     if iface.kind not in ("physical", "loopback", "vlan", "bond", "bridge"):
         lines.append(iface.kind)
+    return lines
+
+
+def ipgroup_detail(iface: Interface, family: int) -> list[str]:
+    """The per-family settings shown in an IP group header: any DHCP/RA-assigned
+    address, plus the gateway, DNS and search the same lease hands out. Static
+    addresses are drawn as their own boxes inside the frame, not here."""
+    lines: list[str] = []
+    for addr in iface.addresses_for(family):
+        if addr.dynamic:
+            lines.append(f"address {addr.cidr}  (dhcp)")
+    gw = iface.gateway_for(family)
+    if gw:
+        lines.append(f"gateway {gw.address}" + ("  (dhcp)" if gw.dynamic else ""))
+    servers = iface.dns_for(family)
+    if servers:
+        lines.append("dns " + " ".join(servers) + ("  (dhcp)" if iface.dns_dynamic else ""))
+    if iface.dns_search:
+        lines.append("search " + " ".join(iface.dns_search))
     return lines
 
 
@@ -170,9 +182,6 @@ class GroupNode(BaseNode):
         else:
             lines.append(iface.kind)
         lines.append(f"{member_count} member{'s' if member_count != 1 else ''}")
-        gw = _gateway_line(iface)
-        if gw:
-            lines.append(gw)
         body, border = theme.node("group")
         super().__init__(iface.name, lines, body, border)
         self.iface = iface
@@ -188,9 +197,6 @@ class VlanNode(BaseNode):
         lines = [iface.name, f"on {iface.vlan_parent}"]
         if iface.alias:
             lines.insert(1, iface.alias)
-        gw = _gateway_line(iface)
-        if gw:
-            lines.append(gw)
         body, border = theme.node("vlan")
         super().__init__(title, lines, body, border)
         self.iface = iface
@@ -198,6 +204,24 @@ class VlanNode(BaseNode):
 
     def _paint_extra(self, painter) -> None:
         self._paint_status_dot(painter, self.iface.is_up)
+
+
+class DraftVlanNode(BaseNode):
+    """A VLAN that does not exist yet: an id, an optional name and any pending
+    addresses, drawn dashed like other drafts. Configure it, then drag it onto a
+    parent link (or use its menu) to create it for real."""
+
+    def __init__(self, draft_id: int, vlan_id: int, name: str, cidrs: list[str]):
+        self.draft_id = draft_id
+        self.vlan_id = vlan_id
+        self.name = name
+        self.cidrs = list(cidrs)
+        lines = [name or "(name set on connect)"]
+        lines += list(cidrs) or ["(no addresses)"]
+        lines.append("drag onto a parent to create")
+        body, border = theme.node("vlan")
+        super().__init__(f"VLAN {vlan_id} (draft)", lines, body, border, dashed=True)
+        self.key = f"draftvlan:{draft_id}"
 
 
 def ip_key(parent_name: str, cidr: str) -> str:
@@ -218,7 +242,7 @@ class IpNode(BaseNode):
         self.draft_id = draft_id
         self.alias = alias
 
-        family_label = f"IPv{family}"
+        family_label = f"v{family} address"
         title = (alias or family_label) + (" (draft)" if self.is_draft else "")
         lines = [cidr + ("  (dhcp)" if dynamic else "")] if cidr else ["(no address)"]
         if alias:
@@ -246,50 +270,94 @@ def new_draft_id() -> int:
     return next(_draft_ids)
 
 
-class DnsFrame(QGraphicsObject):
-    """A dim, dashed frame drawn around the whole diagram, headed "DNS".
+class RegionNode(QGraphicsObject):
+    """A frame that groups several boxes under a shared, clickable header.
 
-    The host's resolvers (read from resolv.conf) apply to every interface at
-    once and aren't something you attach or move, so DNS is drawn as the
-    boundary everything sits inside — not as a box you could drag onto one
-    link. It's a passive backdrop: behind everything, ignores mouse input, and
-    resizes to follow the nodes as they move.
+    Only the header strip is interactive: right-click it for the group's
+    settings, drag it to move the whole group (frame + members) together. The
+    body is inert — its area belongs to the member boxes inside (which still
+    move independently and can be dragged out) and to the empty canvas behind,
+    so the frame never swallows a click meant for a box or for the background.
+
+    The frame carries no position of its own: it stays at the scene origin and
+    its rectangle is recomputed to wrap its members whenever they move.
     """
 
-    OUTER_PAD = 24.0
-    HEADER_GAP = 8.0
+    moved = Signal()
+    drag_finished = Signal()
 
-    def __init__(self, servers: list[str], search: list[str], nodes: list[BaseNode]):
+    OUTER_PAD = 12.0
+    HEADER_GAP = 6.0
+    INNER_GAP = 12.0
+
+    def __init__(self, title: str, detail_lines: list[str],
+                 fill: QColor, border: QColor, members: list[BaseNode]):
         super().__init__()
-        self.setZValue(-1)  # behind edges (0) and nodes (1)
-        self.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
-        self._nodes = list(nodes)
+        # Above edges (0) so the header wins a click over the line entering it,
+        # below the member boxes (1) so they stay on top inside the body.
+        self.setZValue(0.5)
+        self.setAcceptedMouseButtons(
+            Qt.MouseButton.LeftButton | Qt.MouseButton.RightButton
+        )
+        self.key: str | None = None
+        self._members = list(members)
+        self._fill = fill
+        self._border = border
 
         base = QApplication.font()
         self._title_font = QFont(base)
         self._title_font.setBold(True)
         self._detail_font = QFont(base)
         self._detail_font.setPointSizeF(max(7.0, base.pointSizeF() - 1.0))
-        self._title = "DNS"
-        detail = "  ".join(servers) if servers else "(none)"
-        if search:
-            detail += "    search " + " ".join(search)
-        self._detail = detail
+        self._title = title
+        self._details = list(detail_lines)
 
         self._rect = QRectF()
-        for node in self._nodes:
-            node.moved.connect(self.refresh)
+        # Top-left where arrange() last placed the frame; used to anchor the
+        # header when the group has no member boxes to wrap.
+        self._origin = QPointF()
+        self._drag_origin: QPointF | None = None
+        self._origin_start = QPointF()
+        self._member_starts: list[tuple[BaseNode, QPointF]] = []
+        # Note: member moves do NOT auto-grow the frame. Dragging an address out
+        # should let it leave the frame (a detach gesture), not make the frame
+        # chase it. The frame is recomputed at layout time and on a header drag.
         self.refresh()
+
+    # -- geometry / header ------------------------------------------------
+    def _header_height(self) -> float:
+        tm = QFontMetricsF(self._title_font)
+        lm = QFontMetricsF(self._detail_font)
+        return PAD + tm.height() + len(self._details) * lm.height() + PAD
+
+    def _header_rect(self) -> QRectF:
+        return QRectF(self._rect.left(), self._rect.top(),
+                      self._rect.width(), self.OUTER_PAD + self._header_height())
+
+    def _empty_width(self) -> float:
+        tm = QFontMetricsF(self._title_font)
+        lm = QFontMetricsF(self._detail_font)
+        widest = max(
+            [tm.horizontalAdvance(self._title)]
+            + [lm.horizontalAdvance(d) for d in self._details],
+            default=0.0,
+        )
+        return min(max(MIN_W, widest + 2 * PAD), MAX_TEXT_W + 2 * PAD)
 
     def refresh(self) -> None:
         content = QRectF()
-        for node in self._nodes:
-            content = content.united(node.sceneBoundingRect())
+        for member in self._members:
+            content = content.united(member.sceneBoundingRect())
         if content.isNull():
-            new = QRectF()
+            # No member boxes (e.g. a DHCP-only family): draw the header alone,
+            # anchored where arrange() placed us, so the group stays visible and
+            # still works as a drop target.
+            new = QRectF(
+                self._origin.x(), self._origin.y(),
+                self._empty_width(), self.OUTER_PAD + self._header_height(),
+            )
         else:
-            header = QFontMetricsF(self._title_font).height()
-            top_reserve = self.OUTER_PAD + header + self.HEADER_GAP
+            top_reserve = self.OUTER_PAD + self._header_height() + self.HEADER_GAP
             new = content.adjusted(
                 -self.OUTER_PAD, -top_reserve, self.OUTER_PAD, self.OUTER_PAD
             )
@@ -297,32 +365,156 @@ class DnsFrame(QGraphicsObject):
             self.prepareGeometryChange()
             self._rect = new
             self.update()
+            self.moved.emit()
 
     def boundingRect(self) -> QRectF:
         return self._rect.adjusted(-2, -2, 2, 2)
 
+    def shape(self) -> QPainterPath:
+        # Only the header is "solid"; the body lets clicks fall through to the
+        # member boxes or to the canvas behind. This frees the enclosed area.
+        path = QPainterPath()
+        if not self._rect.isNull():
+            path.addRect(self._header_rect())
+        return path
+
+    def anchor(self) -> QPointF:
+        return self._header_rect().center()
+
+    def header_contains(self, scene_pos: QPointF) -> bool:
+        return not self._rect.isNull() and self._header_rect().contains(scene_pos)
+
+    def frame_rect(self) -> QRectF:
+        """The whole frame in scene coordinates (empty if it has no extent)."""
+        return self._rect
+
+    def header_rect_scene(self) -> QRectF:
+        """The header strip in scene coordinates — the drop target for attaching
+        an address by dropping it on the group's title bar."""
+        return self._header_rect() if not self._rect.isNull() else QRectF()
+
+    # -- painting ---------------------------------------------------------
     def paint(self, painter, option, widget=None) -> None:
         if self._rect.isNull():
             return
-        _, border = theme.node("dns")
-        pen = QPen(border, 1.3)
-        pen.setStyle(Qt.PenStyle.DashLine)
-        painter.setPen(pen)
+        header = self._header_rect()
+        painter.fillRect(header, self._fill)
+        painter.setPen(QPen(self._border, 1.2))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRect(self._rect)
+        painter.drawLine(header.bottomLeft(), header.bottomRight())
 
-        x = self._rect.left() + 14
-        y = self._rect.top() + 6
         tm = QFontMetricsF(self._title_font)
+        lm = QFontMetricsF(self._detail_font)
+        x = header.left() + PAD
+        avail = header.width() - 2 * PAD
+        y = header.top() + PAD
         painter.setFont(self._title_font)
         painter.setPen(QPen(theme.text()))
-        painter.drawText(QPointF(x, y + tm.ascent()), self._title)
+        painter.drawText(
+            QPointF(x, y + tm.ascent()),
+            tm.elidedText(self._title, Qt.TextElideMode.ElideRight, avail),
+        )
+        y += tm.height()
         painter.setFont(self._detail_font)
         painter.setPen(QPen(theme.text_dim()))
-        painter.drawText(
-            QPointF(x + tm.horizontalAdvance(self._title) + 12, y + tm.ascent()),
-            self._detail,
+        for line in self._details:
+            painter.drawText(
+                QPointF(x, y + lm.ascent()),
+                lm.elidedText(line, Qt.TextElideMode.ElideRight, avail),
+            )
+            y += lm.height()
+
+    # -- group drag (the header moves every member together) --------------
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_origin = event.scenePos()
+            self._origin_start = QPointF(self._origin)
+            self._member_starts = [(m, m.pos()) for m in self._members]
+            event.accept()
+        else:
+            super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._drag_origin is not None:
+            delta = event.scenePos() - self._drag_origin
+            for member, start in self._member_starts:
+                member.setPos(start + delta)
+            if not self._members:
+                self._origin = self._origin_start + delta
+            # A whole-group drag should carry the frame with it, so refresh here
+            # (unlike a single member's drag, which must not grow the frame).
+            self.refresh()
+            event.accept()
+        else:
+            super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        dragged = (
+            self._drag_origin is not None
+            and (event.scenePos() - self._drag_origin).manhattanLength() > 4
         )
+        self._drag_origin = None
+        self._member_starts = []
+        if dragged:
+            self.drag_finished.emit()
+        else:
+            super().mouseReleaseEvent(event)
+
+    # -- auto-layout ------------------------------------------------------
+    def block_width(self) -> float:
+        widest = max((m.boundingRect().width() for m in self._members), default=0.0)
+        return widest + 2 * self.OUTER_PAD
+
+    def arrange(self, left: float, top: float) -> float:
+        """Stack the members vertically under the header, with the frame's left
+        edge at ``left`` and top at ``top``; return the height the group spans."""
+        self._origin = QPointF(left, top)
+        member_x = left + self.OUTER_PAD
+        cur = top + self.OUTER_PAD + self._header_height() + self.HEADER_GAP
+        for member in self._members:
+            member.setPos(member_x, cur)
+            cur += member.boundingRect().height() + self.INNER_GAP
+        self.refresh()
+        if not self._members:
+            return self.OUTER_PAD + self._header_height()
+        return (cur - self.INNER_GAP + self.OUTER_PAD) - top
+
+
+class IpGroup(RegionNode):
+    """All addresses of one family on one interface, framed together with the
+    gateway, DNS and search that family's lease hands out. The drop target for
+    attaching another address to this interface."""
+
+    def __init__(self, iface: Interface, family: int, members: list[BaseNode]):
+        fill, border = theme.region(family)
+        super().__init__(f"IPv{family}", ipgroup_detail(iface, family), fill, border, members)
+        self.iface = iface
+        self.family = family
+        self.key = f"ipgroup:{iface.name}:{family}"
+
+
+class SystemDns(BaseNode):
+    """Host-wide resolvers (resolv.conf), each tagged with where it comes from,
+    plus any manual extras. A plain box at the top — right-click for settings."""
+
+    def __init__(self, servers: list[str], search: list[str],
+                 manual: list[str], origin):
+        self.servers = list(servers)
+        self.search = list(search)
+        self.manual = list(manual)
+
+        shown = list(servers)
+        for extra in manual:
+            if extra not in shown:
+                shown.append(extra)
+        lines = [f"{s}   ← {origin(s)}" for s in shown] or ["(no resolvers)"]
+        if search:
+            lines.append("search " + " ".join(search))
+        lines.append("+ add resolver…")
+        body, border = theme.node("dns")
+        super().__init__("System DNS", lines, body, border)
+        self.key = "dns:system"
 
 
 class Edge(QGraphicsPathItem):

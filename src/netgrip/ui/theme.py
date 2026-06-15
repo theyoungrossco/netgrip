@@ -35,6 +35,10 @@ _LIGHT = {
     "vlan": ("#dcefec", "#2f8a80"),
     "ip4": ("#e2f1dd", "#3f8a44"),
     "ip6": ("#ece4f7", "#6d51a8"),
+    # Region frames that group an interface's addresses of one family: a faint
+    # header tint over the same border as the family's address boxes.
+    "region4": ("#eaf4e5", "#3f8a44"),
+    "region6": ("#f1ebfa", "#6d51a8"),
     "dns": ("#eceef0", "#7a828a"),
 }
 _DARK = {
@@ -51,6 +55,8 @@ _DARK = {
     "vlan": ("#1f3431", "#4fb3a6"),
     "ip4": ("#1f3020", "#5fae5f"),
     "ip6": ("#2a2440", "#9b86cf"),
+    "region4": ("#1a2618", "#5fae5f"),
+    "region6": ("#221d33", "#9b86cf"),
     "dns": ("#2a2e34", "#828b94"),
 }
 
@@ -123,6 +129,12 @@ def node(kind: str) -> tuple[QColor, QColor]:
 
 def ip_node(family: int) -> tuple[QColor, QColor]:
     fill, border = _table()["ip4" if family == 4 else "ip6"]
+    return QColor(fill), QColor(border)
+
+
+def region(family: int) -> tuple[QColor, QColor]:
+    """(header fill, border) for an IPv4/IPv6 group frame."""
+    fill, border = _table()["region4" if family == 4 else "region6"]
     return QColor(fill), QColor(border)
 
 

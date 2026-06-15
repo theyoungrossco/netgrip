@@ -102,17 +102,23 @@ def plan_rename_link(dev: str, new_name: str, was_up: bool) -> list[list[str]]:
     return plan
 
 
-def plan_set_gateway(dev: str, gateway: str) -> list[list[str]]:
-    """Point the default route at ``gateway`` via ``dev``.
+def _family_flag(family: int) -> str:
+    return "-4" if family == 4 else "-6"
+
+
+def plan_set_gateway(dev: str, gateway: str, family: int) -> list[list[str]]:
+    """Point this family's default route at ``gateway`` via ``dev``.
 
     `replace` adds the default route or updates it in place, so this works
-    whether or not a default route already exists.
+    whether or not a default route already exists. The family flag keeps an
+    IPv4 change from touching the IPv6 default and vice versa.
     """
-    return [["ip", "route", "replace", "default", "via", gateway, "dev", dev]]
+    return [["ip", _family_flag(family), "route", "replace",
+             "default", "via", gateway, "dev", dev]]
 
 
-def plan_clear_gateway(dev: str) -> list[list[str]]:
-    return [["ip", "route", "del", "default", "dev", dev]]
+def plan_clear_gateway(dev: str, family: int) -> list[list[str]]:
+    return [["ip", _family_flag(family), "route", "del", "default", "dev", dev]]
 
 
 def plan_set_dns(dev: str, servers: list[str], search: list[str]) -> list[list[str]]:
