@@ -12,7 +12,22 @@ from PySide6.QtWidgets import QApplication
 import netgrip
 
 
+def _free_windows_console() -> None:
+    """Release any console the setuptools GUI launcher may have allocated.
+
+    The launcher stub uses SetConsoleCtrlHandler to relay Ctrl+C, which can
+    cause Windows to attach a console to the process.  Calling FreeConsole
+    immediately drops it before Windows Terminal renders a tab for it.
+    Safe to call when there is no console (returns False, no side-effects).
+    """
+    import ctypes
+    ctypes.windll.kernel32.FreeConsole()
+
+
 def main(argv: list[str] | None = None) -> int:
+    if sys.platform == "win32":
+        _free_windows_console()
+
     parser = argparse.ArgumentParser(
         prog="netgrip",
         description="Visual, drag-and-drop network interface manager.",
@@ -41,8 +56,10 @@ def main(argv: list[str] | None = None) -> int:
     pref = QSettings().value("theme", "system")
     theme.apply_theme(app, pref if pref in ("system", "light", "dark") else "system")
 
-    # Let Ctrl-C in the launching terminal close the app.
-    signal.signal(signal.SIGINT, signal.SIG_DFL)
+    # Let Ctrl-C in the launching terminal close the app (POSIX only;
+    # on Windows there is no terminal and the call can allocate a console).
+    if sys.platform != "win32":
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
 
     from netgrip.ui.main_window import MainWindow
 

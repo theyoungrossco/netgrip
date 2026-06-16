@@ -111,8 +111,12 @@ def test_hostkey_removal_argv_falls_back_to_bare_host():
 
 
 def test_auth_failure_detected():
+    # Password available: offer the dialog.
     assert is_auth_failure("admin@10.0.0.1: Permission denied (publickey,password).")
     assert is_auth_failure("Permission denied, please try again.")
+    assert is_auth_failure("Permission denied (publickey,keyboard-interactive).")
+    # Publickey-only server: don't offer a password that can't work.
+    assert not is_auth_failure("Permission denied (publickey).")
     assert not is_auth_failure("Host key verification failed.")
     assert not is_auth_failure("Connection refused")
 
@@ -132,7 +136,7 @@ def test_password_switches_off_batchmode_and_sets_askpass_env():
     assert env is not None
     assert env["SSH_ASKPASS_REQUIRE"] == "force"
     assert env["NETGRIP_SSH_PASSWORD"] == "hunter2"
-    assert env["SSH_ASKPASS"].endswith("askpass")
+    assert "askpass" in os.path.basename(env["SSH_ASKPASS"])
     assert runner.had_password()
 
 
@@ -152,7 +156,10 @@ def test_askpass_helper_holds_no_secret():
     with open(path, encoding="utf-8") as fh:
         body = fh.read()
     assert "hunter2" not in body  # secret comes from the env, not the script
-    assert oct(os.stat(path).st_mode)[-3:] == "700"
+    if os.name != "nt":
+        # Windows doesn't have Unix permission bits; the .cmd helper is
+        # readable by the current user only through NTFS ACLs, not st_mode.
+        assert oct(os.stat(path).st_mode)[-3:] == "700"
 
 
 def test_windows_askpass_is_a_secret_free_cmd_helper(monkeypatch):

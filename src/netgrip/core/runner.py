@@ -80,11 +80,18 @@ def offending_hostkey_removal(message: str) -> list[str] | None:
 
 
 def is_auth_failure(message: str) -> bool:
-    """True if ssh rejected the login credentials (vs. a host-key/other error)."""
+    """True if ssh failed with credentials AND password auth is worth trying.
+
+    SSH error messages list the methods the server still accepts, e.g.
+    ``Permission denied (publickey,password).``  Offering a password dialog
+    when ``password`` is absent (server is publickey-only) would be misleading,
+    so we only return True when the message indicates password or
+    keyboard-interactive auth is available.
+    """
     lowered = message.lower()
     if "permission denied" not in lowered:
         return False
-    return any(hint in lowered for hint in ("publickey", "password", "please try again"))
+    return any(m in lowered for m in ("password", "keyboard-interactive", "please try again"))
 
 
 # Env var the askpass helper echoes. The password lives only in the ssh
@@ -251,6 +258,11 @@ class SSHRunner(Runner):
             "-o", "ConnectTimeout=10",
             "-o", f"StrictHostKeyChecking={self.hostkey_policy}",
             "-o", "NumberOfPasswordPrompts=1",
+            # Detect dead connections: if the server stops responding, give up
+            # after two missed keepalives (~10 s) rather than hanging until the
+            # Python subprocess timeout fires.
+            "-o", "ServerAliveInterval=5",
+            "-o", "ServerAliveCountMax=2",
             self.host,
             "--",
             # Remote non-interactive shells often lack sbin in PATH.
@@ -287,20 +299,22 @@ class SSHRunner(Runner):
         """Remove the stale host key locally so the next connect can re-learn it."""
         subprocess.run(
             self.hostkey_removal_argv(message),
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=READ_TIMEOUT,
             **_POPEN_EXTRA,
         )
 
-    def _run_remote(self, remote_command: str) -> str:
+    def _run_remote(self, remote_command: str, *, timeout: int = READ_TIMEOUT) -> str:
         argv = self._ssh_argv(remote_command)
         try:
             proc = subprocess.run(
                 argv,
+                stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
-                timeout=WRITE_TIMEOUT,
+                timeout=timeout,
                 env=self._ssh_env(),
                 # Detach from any controlling terminal so ssh asks the askpass
                 # helper for the password instead of trying to read a tty.
@@ -330,10 +344,10 @@ class SSHRunner(Runner):
             return ""
         script = batch_script(commands)
         if self._remote_is_root():
-            return self._run_remote(script)
+            return self._run_remote(script, timeout=WRITE_TIMEOUT)
         # -n: never prompt. An interactive password prompt cannot work through
         # BatchMode ssh, so passwordless sudo (or root login) is required.
-        return self._run_remote("sudo -n sh -c " + shlex.quote(script))
+        return self._run_remote("sudo -n sh -c " + shlex.quote(script), timeout=WRITE_TIMEOUT)
 
 
 class UnconnectedRunner(Runner):
