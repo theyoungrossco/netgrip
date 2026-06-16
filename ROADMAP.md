@@ -63,11 +63,39 @@ also land here, since they need this backend.
 - DHCP client control (request/release) where a persistence backend allows
 - `teamd` teams (read support first)
 
-## 0.4 — visibility: containers & firewall
+## 0.4 — visibility: containers, virtualization & firewall
 
+This is where NetGrip earns its keep. A Proxmox node or Docker host has dozens
+of `veth`s and bridges whose relationships are invisible today: a `veth` shows
+as a stray NIC, and a vlan-aware bridge shows no tags, so the canvas is a flat
+mesh of unconnected boxes. The job here is *read-only* clarity first — show what
+connects to what — before any editing.
+
+This starts with a small model change: generalize the current VLAN-specific
+parent/child plumbing (`Interface.vlan_parent` / `vlan_id`, the parent→child
+`Edge`) into a shared **"virtual interface on a parent link"** concept that
+`veth` peers and bridge-VLAN ports reuse, rather than special-casing each kind.
+Note these are three *different* kernel objects, not one to be merged: an 802.1q
+**VLAN** subinterface (a tagged child of one parent), a **veth** (a two-ended
+virtual cable, usually host-bridge ↔ container), and a **bridge port's VLAN
+filtering** (PVID + tagged list on a vlan-aware bridge). They share plumbing and
+a "virtual" feel, but each keeps its own correct name — we do *not* rebrand VLAN
+to veth.
+
+- **veth pairs as first-class links.** A `veth` is a virtual cable with two
+  ends, not a NIC. Pair the two ends (peer ifindex from `ip -d -json link`, no
+  privilege needed) and draw them as a single edge, so a container's `veth`
+  visibly lands on its host bridge instead of floating free.
 - **Docker awareness:** label each `veth` with its container and **docker
-  network** name; show which **host ports a container forwards**. Display-first;
-  make alterable only where it clearly makes sense.
+  network** name; show which **host ports a container forwards** (`docker
+  inspect` / `docker network inspect`; published ports cross-checked against
+  `iptables -t nat` / `nft`). Display-first; make alterable only where it
+  clearly makes sense.
+- **Proxmox / vlan-aware bridges:** read each bridge member port's
+  **tagged/untagged VLANs** (`bridge -json vlan show`: `pvid` = untagged,
+  `vlanlist` = tagged) and the `bridge-vlan-aware` flag (from
+  `/etc/network/interfaces`). Render a member as a port carrying its VLAN tags,
+  so a Proxmox node's VLAN topology is legible instead of a flat mesh.
 - **Inbound firewall rules** per interface, read from `nft -j list ruleset`
   (fallback `iptables-save`). Display first; editing is a later, careful step.
 
