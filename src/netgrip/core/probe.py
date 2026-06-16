@@ -18,6 +18,11 @@ ROUTE_COMMANDS = {
 # One round trip for DNS: capability marker, then resolv.conf (the effective,
 # host-wide list), then resolvectl's per-link servers and search domains so we
 # can show where each resolver comes from. Sections are separated by markers.
+#
+# Every piece is best-effort, so the script ends with `exit 0`: on a host
+# without systemd-resolved, `resolvectl` is "command not found" (exit 127) and
+# would otherwise fail the whole read — discarding the resolv.conf we just read
+# and leaving DNS blank, even though resolv.conf was there all along.
 _LINKDNS = "@@LINKDNS@@"
 _LINKDOMAIN = "@@LINKDOMAIN@@"
 DNS_COMMAND = [
@@ -25,7 +30,8 @@ DNS_COMMAND = [
     "command -v resolvectl >/dev/null 2>&1 && echo yes || echo no; "
     "cat /etc/resolv.conf 2>/dev/null; "
     f"echo {_LINKDNS}; resolvectl dns 2>/dev/null; "
-    f"echo {_LINKDOMAIN}; resolvectl domain 2>/dev/null",
+    f"echo {_LINKDOMAIN}; resolvectl domain 2>/dev/null; "
+    "exit 0",
 ]
 
 # `resolvectl dns` / `domain` print one line per link: "Link 2 (eth0): a b c".

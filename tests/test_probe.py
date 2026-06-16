@@ -1,11 +1,19 @@
 """Parsing of `ip -details -json address show` output."""
 
+import os
+import shutil
+import subprocess
+
 from netgrip.core.model import Gateway
 from netgrip.core.probe import (
+    _LINKDNS,
+    _LINKDOMAIN,
+    DNS_COMMAND,
     parse_addr_json,
     parse_resolv_conf,
     parse_resolvectl_links,
     parse_route_json,
+    probe_dns,
 )
 
 # Trimmed but structurally faithful iproute2 JSON for: loopback, a physical
@@ -156,3 +164,50 @@ def test_parse_resolv_conf_servers_and_search():
 
 def test_parse_resolv_conf_empty():
     assert parse_resolv_conf("") == ([], [])
+
+
+class _FakeRunner:
+    """Returns one canned string for any read; enough to exercise probe_dns."""
+
+    def __init__(self, output: str):
+        self._output = output
+
+    def run(self, argv):
+        return self._output
+
+
+def test_probe_dns_without_resolvectl_keeps_resolv_conf():
+    # A host without systemd-resolved: capability marker 'no', resolv.conf
+    # servers, then empty resolvectl sections. The host-wide resolvers must
+    # still come through (the bug discarded them when the read "failed").
+    output = (
+        "no\n"
+        "search lan.example\n"
+        "nameserver 10.0.0.1\n"
+        "nameserver 2001:db8::1\n"
+        f"{_LINKDNS}\n{_LINKDOMAIN}\n"
+    )
+    servers, search, can_edit, per_link = probe_dns(_FakeRunner(output))
+    assert servers == ["10.0.0.1", "2001:db8::1"]
+    assert search == ["lan.example"]
+    assert can_edit is False
+    assert per_link == {}
+
+
+def test_dns_command_exits_zero_without_resolvectl(tmp_path):
+    # Regression: on a host without resolvectl, the command is "not found"
+    # (exit 127). The DNS read must still exit 0 so the resolv.conf it already
+    # gathered survives. Run the real script with a PATH that holds only the
+    # tools it needs, guaranteeing resolvectl is absent.
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    for tool in ("sh", "cat"):
+        src = shutil.which(tool)
+        assert src, f"{tool} must exist to run this test"
+        os.symlink(src, bindir / tool)
+    proc = subprocess.run(
+        DNS_COMMAND, capture_output=True, text=True, env={"PATH": str(bindir)}
+    )
+    assert proc.returncode == 0
+    assert _LINKDNS in proc.stdout
+    assert _LINKDOMAIN in proc.stdout

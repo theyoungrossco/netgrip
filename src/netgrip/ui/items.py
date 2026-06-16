@@ -231,20 +231,35 @@ def ip_key(parent_name: str, cidr: str) -> str:
 
 class IpNode(BaseNode):
     """One IP address: a single CIDR of one family on one interface, or a
-    draft (single address) not yet attached anywhere. May carry a free-form
-    name the user has given it."""
+    draft not yet attached anywhere. A draft is a whole per-family config: it
+    can also stage the gateway, DNS servers and search domains to apply on
+    attach (shown as extra lines). May carry a free-form name the user gave it.
+    """
 
     def __init__(self, family: int, cidr: str, parent_name: str | None,
-                 dynamic: bool = False, draft_id: int | None = None, alias: str = ""):
+                 dynamic: bool = False, draft_id: int | None = None, alias: str = "",
+                 gateway: str = "", dns: list[str] | None = None,
+                 dns_search: list[str] | None = None):
         self.family = family
         self.cidr = cidr
         self.parent_name = parent_name
         self.draft_id = draft_id
         self.alias = alias
+        # Staged per-family settings, applied when a draft is attached.
+        self.gateway = gateway
+        self.dns = list(dns or [])
+        self.dns_search = list(dns_search or [])
 
         family_label = f"v{family} address"
         title = (alias or family_label) + (" (draft)" if self.is_draft else "")
         lines = [cidr + ("  (dhcp)" if dynamic else "")] if cidr else ["(no address)"]
+        if self.is_draft:
+            if gateway:
+                lines.append(f"gateway {gateway}")
+            if self.dns:
+                lines.append("dns " + " ".join(self.dns))
+            if self.dns_search:
+                lines.append("search " + " ".join(self.dns_search))
         if alias:
             lines.append(family_label)  # keep the family visible behind the name
         body, border = theme.ip_node(family)
@@ -494,9 +509,20 @@ class IpGroup(RegionNode):
         self.key = f"ipgroup:{iface.name}:{family}"
 
 
-class SystemDns(BaseNode):
+class SystemDns(RegionNode):
     """Host-wide resolvers (resolv.conf), each tagged with where it comes from,
-    plus any manual extras. A plain box at the top — right-click for settings."""
+    plus any manual extras. Drawn as a frame around the whole diagram with an
+    interactive title bar: DNS is system-wide, so the frame says "this applies
+    to everything" by enclosing it.
+
+    Like every :class:`RegionNode`, only the title bar is solid — the framed
+    body is transparent to clicks (see :meth:`RegionNode.shape`), so the frame
+    never swallows a gesture meant for a box or the canvas behind it. It is
+    pinned (not draggable): :meth:`wrap` re-fits it around the diagram on every
+    layout. Right-click the title bar to edit manual resolvers."""
+
+    # Breathing room between the frame border and the diagram it encloses.
+    FRAME_PAD = 16.0
 
     def __init__(self, servers: list[str], search: list[str],
                  manual: list[str], origin):
@@ -512,9 +538,38 @@ class SystemDns(BaseNode):
         if search:
             lines.append("search " + " ".join(search))
         lines.append("+ add resolver…")
-        body, border = theme.node("dns")
-        super().__init__("System DNS", lines, body, border)
-        self.key = "dns:system"
+        fill, border = theme.node("dns")
+        super().__init__("System DNS", lines, fill, border, members=[])
+
+    def top_reserve(self) -> float:
+        """Vertical space the title bar (plus padding) needs above the diagram,
+        so the canvas can start the tree low enough to sit inside the frame."""
+        return self.OUTER_PAD + self._header_height() + self.HEADER_GAP + self.FRAME_PAD
+
+    def wrap(self, content: QRectF) -> None:
+        """Fit the frame around ``content`` (the whole diagram), title bar on
+        top. With nothing to wrap, fall back to the header alone at the origin."""
+        if content.isNull():
+            self._origin = QPointF(self.OUTER_PAD, self.OUTER_PAD)
+            new = QRectF(self.OUTER_PAD, self.OUTER_PAD, self._empty_width(),
+                         self.OUTER_PAD + self._header_height())
+        else:
+            new = content.adjusted(
+                -self.FRAME_PAD, -self.top_reserve(), self.FRAME_PAD, self.FRAME_PAD
+            )
+        if new != self._rect:
+            self.prepareGeometryChange()
+            self._rect = new
+            self.update()
+
+    def mousePressEvent(self, event) -> None:
+        # Pinned frame: the title bar is a right-click target, never a drag
+        # handle. Swallow the left press so the frame stays wrapped and the
+        # view doesn't start a rubber-band selection from the title bar.
+        if event.button() == Qt.MouseButton.LeftButton:
+            event.accept()
+        else:
+            super().mousePressEvent(event)
 
 
 class Edge(QGraphicsPathItem):

@@ -126,6 +126,9 @@ class Canvas(QGraphicsView):
             IpNode(
                 d["family"], d["cidr"], None, draft_id=d["id"],
                 alias=self._aliases.get(_alias_key(d["family"], d["cidr"]), ""),
+                gateway=d.get("gateway", ""),
+                dns=d.get("dns", []),
+                dns_search=d.get("dns_search", []),
             )
             for d in self._drafts
         ]
@@ -175,15 +178,15 @@ class Canvas(QGraphicsView):
             scene.addItem(group)
             group.drag_finished.connect(self._save_state)
 
-        # The host-wide resolvers, drawn as a plain box (not an enclosing frame).
+        # The host-wide resolvers, drawn as a frame around the whole diagram with
+        # only its title bar interactive (it applies to everything). It's pinned
+        # and re-fitted by wrap() below, so it has no saved position of its own.
         dns_node: SystemDns | None = None
         if state.dns or state.dns_search or self._manual_dns:
             dns_node = SystemDns(
                 state.dns, state.dns_search, self._manual_dns, state.resolver_origin
             )
             scene.addItem(dns_node)
-            dns_node.drag_finished.connect(self._save_state)
-            dns_node.moved.connect(self._make_position_saver(dns_node))
 
         # Edges: vlan->parent, member->group, interface->its IP groups.
         for iface in shown:
@@ -195,11 +198,11 @@ class Canvas(QGraphicsView):
         for group in ip_groups:
             scene.addItem(Edge(if_nodes[group.iface.name], group))
 
-        # The DNS box is pinned at the top; the interface tree starts below it.
+        # Leave room at the top for the DNS frame's title bar; the tree lays out
+        # below it and the frame wraps the whole thing once it's positioned.
         start_y = MARGIN
         if dns_node is not None:
-            dns_node.setPos(MARGIN, MARGIN)
-            start_y = MARGIN + dns_node.boundingRect().height() + V_GAP
+            start_y = MARGIN + dns_node.top_reserve()
         self._layout_tree(roots, children, start_y)
 
         for draft, node in zip(self._drafts, draft_nodes, strict=True):
@@ -212,8 +215,6 @@ class Canvas(QGraphicsView):
         # Remembered positions win over the automatic layout; members moving
         # makes their group reflow around them.
         remembered = [*if_nodes.values(), *ip_nodes]
-        if dns_node is not None:
-            remembered.append(dns_node)
         for node in remembered:
             if node.key in self._positions:
                 node.setPos(self._positions[node.key])
@@ -223,6 +224,15 @@ class Canvas(QGraphicsView):
         # final position.
         for group in ip_groups:
             group.refresh()
+
+        # The DNS frame wraps the finished diagram, so fit it last — after every
+        # node (including remembered positions) has settled.
+        if dns_node is not None:
+            content = QRectF()
+            for node in [*if_nodes.values(), *ip_nodes, *ip_groups,
+                         *draft_nodes, *draft_vlan_nodes]:
+                content = content.united(node.sceneBoundingRect())
+            dns_node.wrap(content)
 
         rect = scene.itemsBoundingRect().adjusted(-MARGIN, -MARGIN, MARGIN, MARGIN)
         scene.setSceneRect(rect)
@@ -275,6 +285,9 @@ class Canvas(QGraphicsView):
                     "id": new_draft_id(),
                     "family": int(d["family"]),
                     "cidr": str(d["cidr"]),
+                    "gateway": str(d.get("gateway", "")),
+                    "dns": [str(s) for s in d.get("dns", [])],
+                    "dns_search": [str(s) for s in d.get("dns_search", [])],
                     "pos": QPointF(float(pos[0]), float(pos[1])),
                 })
             except (KeyError, TypeError, ValueError, IndexError):
@@ -300,6 +313,9 @@ class Canvas(QGraphicsView):
             "positions": {k: [p.x(), p.y()] for k, p in self._positions.items()},
             "drafts": [
                 {"family": d["family"], "cidr": d["cidr"],
+                 "gateway": d.get("gateway", ""),
+                 "dns": list(d.get("dns", [])),
+                 "dns_search": list(d.get("dns_search", [])),
                  "pos": [d["pos"].x(), d["pos"].y()]}
                 for d in self._drafts
             ],
@@ -334,16 +350,22 @@ class Canvas(QGraphicsView):
     # ------------------------------------------------------------------ #
     # drafts (IP configs not attached to any interface yet)
     # ------------------------------------------------------------------ #
-    def add_draft(self, family: int, cidr: str, scene_pos: QPointF, name: str = "") -> None:
-        self._drafts.append(
-            {"id": new_draft_id(), "family": family, "cidr": cidr, "pos": scene_pos}
-        )
+    def add_draft(self, family: int, cidr: str, scene_pos: QPointF, name: str = "",
+                  gateway: str = "", dns: list[str] | None = None,
+                  dns_search: list[str] | None = None) -> None:
+        self._drafts.append({
+            "id": new_draft_id(), "family": family, "cidr": cidr,
+            "gateway": gateway, "dns": list(dns or []),
+            "dns_search": list(dns_search or []), "pos": scene_pos,
+        })
         if name:
             self._aliases[_alias_key(family, cidr)] = name
         self._save_state()
         self.populate(self._state)
 
-    def update_draft(self, draft_id: int, cidr: str) -> None:
+    def update_draft(self, draft_id: int, cidr: str, gateway: str = "",
+                     dns: list[str] | None = None,
+                     dns_search: list[str] | None = None) -> None:
         for d in self._drafts:
             if d["id"] == draft_id:
                 old_key = _alias_key(d["family"], d["cidr"])
@@ -351,6 +373,9 @@ class Canvas(QGraphicsView):
                 if old_key != new_key and old_key in self._aliases:
                     self._aliases[new_key] = self._aliases.pop(old_key)
                 d["cidr"] = cidr
+                d["gateway"] = gateway
+                d["dns"] = list(dns or [])
+                d["dns_search"] = list(dns_search or [])
         self._save_state()
         self.populate(self._state)
 
@@ -523,6 +548,12 @@ class Canvas(QGraphicsView):
         item = self.itemAt(event.pos())
         # A region only "owns" its header strip (its shape), so a right-click in
         # the body falls through to the box under it or to the empty canvas.
+        # The DNS frame is a region too, but its title bar carries the node menu
+        # (manual resolvers), not the per-family IP-group menu.
+        if isinstance(item, SystemDns):
+            self.node_menu_requested.emit(item, event.globalPos())
+            event.accept()
+            return
         if isinstance(item, RegionNode):
             self.region_menu_requested.emit(item, event.globalPos())
             event.accept()

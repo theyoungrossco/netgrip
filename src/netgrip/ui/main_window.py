@@ -4,6 +4,7 @@ into confirmed command plans.
 
 from __future__ import annotations
 
+import ipaddress
 from functools import partial
 
 from PySide6.QtCore import QPoint, QPointF, QSettings, Qt
@@ -22,7 +23,14 @@ from PySide6.QtWidgets import (
 import netgrip
 from netgrip.core import actions
 from netgrip.core.demo import DEMO_DNS, DEMO_DNS_SEARCH, demo_interfaces
-from netgrip.core.model import GROUP_KINDS, HostState, Interface, ip_family
+from netgrip.core.model import (
+    GROUP_KINDS,
+    Address,
+    Gateway,
+    HostState,
+    Interface,
+    ip_family,
+)
 from netgrip.core.probe import apply_link_dns, probe, probe_dns
 from netgrip.core.runner import DemoRunner, LocalRunner, Runner, SSHRunner
 from netgrip.core.sshhosts import ssh_config_hosts
@@ -268,12 +276,7 @@ class MainWindow(QMainWindow):
     def _on_ip_dropped(self, node: IpNode, target, clone: bool) -> None:
         target_name = target.iface.name
         if node.is_draft:
-            draft_id = node.draft_id
-            self._apply(
-                f"Attach IPv{node.family} config to {target_name}",
-                actions.plan_add_addresses(target_name, [node.cidr]),
-                on_success=lambda: self.canvas.remove_draft(draft_id),
-            )
+            self._attach_draft(node, target_name)
         elif clone:
             self._apply(
                 f"Clone IPv{node.family} config to {target_name}",
@@ -362,11 +365,14 @@ class MainWindow(QMainWindow):
         menu.addAction("Edit manual resolvers…", self._manual_dns_dialog)
 
     def _add_common_iface_items(self, menu: QMenu, iface: Interface) -> None:
+        # A "config" is the whole family: address (static or DHCP/RA), gateway,
+        # DNS and search — the rich IpGroup dialog. Adding a bare extra address
+        # to a family that already has one lives on the group's region menu.
         menu.addAction(
-            "Add IPv4 config…", partial(self._add_ip_dialog, iface.name, 4)
+            "Add IPv4 config…", partial(self._ipgroup_settings_dialog, iface, 4)
         )
         menu.addAction(
-            "Add IPv6 config…", partial(self._add_ip_dialog, iface.name, 6)
+            "Add IPv6 config…", partial(self._ipgroup_settings_dialog, iface, 6)
         )
         if iface.kind != "vlan":
             menu.addAction("Add VLAN…", partial(self._add_vlan_dialog, iface.name))
@@ -491,7 +497,7 @@ class MainWindow(QMainWindow):
                     iface.name,
                     partial(self._attach_draft, node, iface.name),
                 )
-            menu.addAction("Edit address…", partial(self._edit_ip_dialog, node))
+            menu.addAction("Edit config…", partial(self._edit_draft_config_dialog, node))
             menu.addAction("Set name…", partial(self._name_ip_dialog, node))
             menu.addSeparator()
             menu.addAction(
@@ -562,12 +568,10 @@ class MainWindow(QMainWindow):
             )
 
     def _edit_ip_dialog(self, node: IpNode) -> None:
+        """Edit one attached address box (a single CIDR). Drafts are whole
+        per-family configs and use :meth:`_edit_draft_config_dialog` instead."""
         dialog = IpConfigDialog(self, node.family, initial=node.cidr, name=node.alias)
         if not dialog.exec():
-            return
-        if node.is_draft:
-            self.canvas.update_draft(node.draft_id, dialog.cidr)
-            self.canvas.set_ip_name(node.family, dialog.cidr, dialog.name)
             return
         cidr, name, family, parent = dialog.cidr, dialog.name, node.family, node.parent_name
         rename = lambda: self.canvas.set_ip_name(family, cidr, name)  # noqa: E731
@@ -586,10 +590,62 @@ class MainWindow(QMainWindow):
                 actions.plan_create_vlan(ifname, dialog.vlan_id, dialog.name),
             )
 
+    def _draft_iface(self, family: int, cidr: str = "", gateway: str = "",
+                     dns: list[str] | None = None,
+                     dns_search: list[str] | None = None) -> Interface:
+        """A throwaway Interface that feeds a draft's staged config into the
+        IpGroup dialog (which reads everything off an Interface)."""
+        addresses: list[Address] = []
+        if cidr:
+            try:
+                parsed = ipaddress.ip_interface(cidr)
+                addresses.append(Address(str(parsed.ip), parsed.network.prefixlen, family))
+            except ValueError:
+                pass
+        gateways = {family: Gateway(gateway)} if gateway else {}
+        return Interface(
+            name="(draft)", addresses=addresses, gateways=gateways,
+            dns=list(dns or []), dns_search=list(dns_search or []),
+        )
+
+    def _draft_config_from(self, dlg: IpGroupDialog) -> dict:
+        """The parts of an IpGroup dialog result a detached draft can hold:
+        a static address, static gateway and static DNS/search (Dynamic means
+        "decide on attach", so it stages nothing)."""
+        return {
+            "cidr": dlg.new_static_address,  # "" when Dynamic
+            "gateway": dlg.gateway if dlg.gateway_static else "",
+            "dns": dlg.dns_servers if dlg.dns_static else [],
+            "dns_search": dlg.dns_search if dlg.dns_static else [],
+        }
+
     def _new_draft_dialog(self, family: int, scene_pos: QPointF) -> None:
-        dialog = IpConfigDialog(self, family, title=f"New IPv{family} config (draft)")
-        if dialog.exec():
-            self.canvas.add_draft(family, dialog.cidr, scene_pos, name=dialog.name)
+        dlg = IpGroupDialog(
+            self, self._draft_iface(family), family,
+            can_edit_dns=self.state.can_edit_dns if self.state else False,
+            title=f"New IPv{family} config (draft)",
+        )
+        if not dlg.exec():
+            return
+        cfg = self._draft_config_from(dlg)
+        self.canvas.add_draft(family, cfg["cidr"], scene_pos, **{
+            k: cfg[k] for k in ("gateway", "dns", "dns_search")
+        })
+
+    def _edit_draft_config_dialog(self, node: IpNode) -> None:
+        family = node.family
+        iface = self._draft_iface(family, node.cidr, node.gateway, node.dns, node.dns_search)
+        dlg = IpGroupDialog(
+            self, iface, family,
+            can_edit_dns=self.state.can_edit_dns if self.state else False,
+            title=f"Edit IPv{family} config (draft)",
+            initial_static=node.cidr,
+        )
+        if not dlg.exec():
+            return
+        cfg = self._draft_config_from(dlg)
+        self.canvas.update_draft(node.draft_id, cfg["cidr"], cfg["gateway"],
+                                 cfg["dns"], cfg["dns_search"])
 
     def _new_vlan_draft_dialog(self, scene_pos: QPointF) -> None:
         existing = self.state.link_names() if self.state else set()
@@ -635,11 +691,25 @@ class MainWindow(QMainWindow):
             self.canvas.set_ip_name(node.family, node.cidr, text.strip())
 
     def _attach_draft(self, node: IpNode, ifname: str) -> None:
+        """Attach a staged draft to ``ifname``: apply its address, gateway and
+        DNS together, then drop the draft once they land."""
+        iface = self.state.get(ifname) if self.state else None
+        if iface is None:
+            return
+        plan, _changed = self._ipgroup_plan(
+            iface, node.family,
+            address=node.cidr,
+            gateway_static=bool(node.gateway), gateway=node.gateway,
+            dns_static=bool(node.dns or node.dns_search),
+            dns_servers=node.dns, dns_search=node.dns_search,
+        )
         draft_id = node.draft_id
+        remove = lambda: self.canvas.remove_draft(draft_id)  # noqa: E731
+        if not plan:
+            remove()  # nothing to apply (empty draft); just clear it
+            return
         self._apply(
-            f"Attach IPv{node.family} config to {ifname}",
-            actions.plan_add_addresses(ifname, [node.cidr]),
-            on_success=lambda: self.canvas.remove_draft(draft_id),
+            f"Attach IPv{node.family} config to {ifname}", plan, on_success=remove,
         )
 
     def _clone_ip(self, node: IpNode) -> None:
@@ -678,37 +748,52 @@ class MainWindow(QMainWindow):
         if plan:
             self._apply(f"Update {iface.name} ({', '.join(changed)})", plan)
 
+    def _ipgroup_plan(self, iface: Interface, family: int, *, address: str = "",
+                      gateway_static: bool = False, gateway: str = "",
+                      dns_static: bool = False, dns_servers: list[str] | None = None,
+                      dns_search: list[str] | None = None) -> tuple[list[list[str]], list[str]]:
+        """Build the plan to bring ``iface``'s IPv``family`` config to a desired
+        state: a static address (added if new), gateway and DNS. Shared by the
+        IPv4/6 settings dialog and by attaching a staged draft. Returns the plan
+        and the list of changed parts (for the confirmation title)."""
+        dns_servers = dns_servers or []
+        dns_search = dns_search or []
+        plan: list[list[str]] = []
+        changed: list[str] = []
+        if address and not any(a.cidr == address for a in iface.addresses):
+            plan += actions.plan_add_addresses(iface.name, [address])
+            changed.append("address")
+        # Gateway only when Static is chosen; Dynamic leaves the lease alone.
+        if gateway_static:
+            current = iface.gateway_for(family)
+            current_addr = current.address if current else ""
+            if gateway and gateway != current_addr:
+                plan += actions.plan_set_gateway(iface.name, gateway, family)
+                changed.append("gateway")
+            elif not gateway and current:
+                plan += actions.plan_clear_gateway(iface.name, family)
+                changed.append("gateway")
+        # DNS is per-link: keep the other family's servers when setting this one.
+        if dns_static:
+            other = [s for s in iface.dns if ip_family(s) != family]
+            combined = other + dns_servers
+            if combined != iface.dns or dns_search != iface.dns_search:
+                plan += actions.plan_set_dns(iface.name, combined, dns_search)
+                changed.append("DNS")
+        return plan, changed
+
     def _ipgroup_settings_dialog(self, iface: Interface, family: int) -> None:
         if not self.state:
             return
         dlg = IpGroupDialog(self, iface, family, can_edit_dns=self.state.can_edit_dns)
         if not dlg.exec():
             return
-        plan: list[list[str]] = []
-        changed: list[str] = []
-        # A Static address typed in the Addressing field is added (if new).
-        if dlg.new_static_address and not any(
-            a.cidr == dlg.new_static_address for a in iface.addresses
-        ):
-            plan += actions.plan_add_addresses(iface.name, [dlg.new_static_address])
-            changed.append("address")
-        # Gateway only when Static is chosen; Dynamic leaves the lease alone.
-        if dlg.gateway_static:
-            current = iface.gateway_for(family)
-            current_addr = current.address if current else ""
-            if dlg.gateway and dlg.gateway != current_addr:
-                plan += actions.plan_set_gateway(iface.name, dlg.gateway, family)
-                changed.append("gateway")
-            elif not dlg.gateway and current:
-                plan += actions.plan_clear_gateway(iface.name, family)
-                changed.append("gateway")
-        # DNS is per-link: keep the other family's servers when setting this one.
-        if dlg.dns_static:
-            other = [s for s in iface.dns if ip_family(s) != family]
-            combined = other + dlg.dns_servers
-            if combined != iface.dns or dlg.dns_search != iface.dns_search:
-                plan += actions.plan_set_dns(iface.name, combined, dlg.dns_search)
-                changed.append("DNS")
+        plan, changed = self._ipgroup_plan(
+            iface, family,
+            address=dlg.new_static_address,
+            gateway_static=dlg.gateway_static, gateway=dlg.gateway,
+            dns_static=dlg.dns_static, dns_servers=dlg.dns_servers, dns_search=dlg.dns_search,
+        )
         if plan:
             self._apply(f"Update {iface.name} IPv{family} ({', '.join(changed)})", plan)
 

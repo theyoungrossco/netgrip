@@ -229,16 +229,23 @@ class LinkPropertiesDialog(QDialog):
 
 
 class IpGroupDialog(QDialog):
-    """Per-family settings for one interface: default gateway, DNS servers and
-    search domains — everything a DHCP/RA lease for this family hands out.
+    """Per-family settings for one interface: the address (static or
+    DHCP/RA-assigned), default gateway, DNS servers and search domains —
+    everything a DHCP/RA lease for this family hands out.
 
-    Gateway and DNS each use a Dynamic/Static toggle: Dynamic leaves the
-    current (often DHCP-assigned) value alone, Static applies a custom one.
+    Address, gateway and DNS each use a Dynamic/Static toggle: Dynamic leaves
+    the current (often DHCP-assigned) value alone, Static applies a custom one.
+
+    The same dialog backs three flows: per-family *settings* on an existing
+    interface, *adding* a family's config to one that has none yet, and
+    composing a detached *draft* config. For a draft, pass ``initial_static``
+    (the draft's own static address, so it pre-fills) and a ``title``.
     """
 
-    def __init__(self, parent, iface: Interface, family: int, can_edit_dns: bool = False):
+    def __init__(self, parent, iface: Interface, family: int, can_edit_dns: bool = False,
+                 *, title: str | None = None, initial_static: str = ""):
         super().__init__(parent)
-        self.setWindowTitle(f"{iface.name} · IPv{family} settings")
+        self.setWindowTitle(title or f"{iface.name} · IPv{family} settings")
         self._iface = iface
         self._family = family
         gw = iface.gateway_for(family)
@@ -253,12 +260,14 @@ class IpGroupDialog(QDialog):
         self.dns_search: list[str] = list(iface.dns_search)
 
         form = QFormLayout(self)
-        # Addressing: Dynamic (DHCP/RA) leaves the lease alone; Static adds a
-        # fixed address. Actually starting a DHCP client is the 0.2 backend, so
-        # only the Static path applies a change today.
+        # Addressing: Dynamic (DHCP/RA) leaves the lease alone; Static sets a
+        # fixed address. A DHCP/RA lease pre-fills Dynamic (greyed); a draft's
+        # own static address pre-fills Static via ``initial_static``. Actually
+        # starting a DHCP client is the 0.2 backend, so only Static applies a
+        # change today.
         self._addr_field = DynamicStaticField(
-            current=dyn_addr.cidr if dyn_addr else "",
-            is_dynamic=bool(dyn_addr),
+            current=dyn_addr.cidr if dyn_addr else initial_static,
+            is_dynamic=bool(dyn_addr) or not initial_static,
             placeholder="e.g. 192.168.1.20/24" if family == 4 else "e.g. 2001:db8::20/64",
         )
         form.addRow("Addressing:", self._addr_field)

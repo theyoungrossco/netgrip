@@ -43,6 +43,17 @@ The UI gains a per-host indicator of which backend is in use and whether a
 change will persist. Persistent renames/aliases (systemd `.link` files, udev)
 also land here, since they need this backend.
 
+- **Make the Addressing "Dynamic" toggle actionable.** Today, picking *Dynamic*
+  in the IPv4/IPv6 settings dialog (`IpGroupDialog`) is a pure no-op: switching
+  a static interface to DHCP/RA does nothing, because `_ipgroup_plan` only ever
+  *adds* a static address/gateway/DNS — there's no "tear down static + start a
+  client" path (it needs this backend). Two parts: (a) Dynamic should remove the
+  existing static address (and clear the static gateway) and start the DHCP/RA
+  client; (b) fix the dialog default — for an existing static interface the
+  address field currently defaults to *Dynamic* with an empty value and doesn't
+  pre-fill the static address, so it can't even show/edit static today and a
+  future Dynamic=teardown would risk wiping config on a no-touch OK.
+
 ## 0.3 — more of the network
 
 - Bridge creation (same gesture as bonds)
