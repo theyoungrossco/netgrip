@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QInputDialog,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -32,7 +33,14 @@ from netgrip.core.model import (
     ip_family,
 )
 from netgrip.core.probe import apply_link_dns, probe, probe_dns
-from netgrip.core.runner import DemoRunner, LocalRunner, Runner, SSHRunner
+from netgrip.core.runner import (
+    DemoRunner,
+    LocalRunner,
+    Runner,
+    SSHRunner,
+    hostkey_failure,
+    is_auth_failure,
+)
 from netgrip.core.sshhosts import ssh_config_hosts
 from netgrip.ui import theme
 from netgrip.ui.canvas import Canvas
@@ -222,8 +230,78 @@ class MainWindow(QMainWindow):
         run_in_background(
             work,
             on_done=lambda res: (self._set_busy(False), self._set_state(*res)),
-            on_error=lambda msg: (self._set_busy(False), self._show_error(msg)),
+            on_error=lambda msg: (self._set_busy(False), self._on_refresh_error(msg)),
         )
+
+    def _on_refresh_error(self, message: str) -> None:
+        runner = self.runner
+        kind = hostkey_failure(message) if isinstance(runner, SSHRunner) else None
+        # Only offer once: if we already relaxed the policy and it still failed,
+        # show the real error rather than looping on the same dialog.
+        if kind and runner.hostkey_policy == SSHRunner.HOSTKEY_STRICT:
+            self._offer_accept_hostkey(runner, kind, message)
+            return
+        if isinstance(runner, SSHRunner) and is_auth_failure(message):
+            self._prompt_password(runner)
+            return
+        self._show_error(message)
+
+    def _prompt_password(self, runner: SSHRunner) -> None:
+        # Re-prompt on a failed attempt; an empty entry / Cancel gives up.
+        retry = runner.had_password()
+        self.statusBar().showMessage("Authentication required")
+        prompt = (
+            "Password was not accepted. Try again:"
+            if retry
+            else f"Password for {runner.host}:"
+        )
+        password, ok = QInputDialog.getText(
+            self, "SSH password", prompt, QLineEdit.EchoMode.Password
+        )
+        if not ok or not password:
+            runner.set_password(None)
+            self.statusBar().showMessage("Not connected")
+            return
+        runner.set_password(password)
+        self.refresh()
+
+    def _offer_accept_hostkey(self, runner: SSHRunner, kind: str, message: str) -> None:
+        if kind == "changed":
+            self.statusBar().showMessage("Host key changed")
+            title = "Host key changed"
+            text = (
+                f"WARNING: the host key for “{runner.host}” is different from the "
+                "one saved in your known_hosts file.\n\n"
+                "This is normal if the machine was reinstalled or its address was "
+                "reused — but it can also mean someone is impersonating the host "
+                "(a man-in-the-middle attack).\n\n"
+                "Connect anyway? The old key will be replaced with the new one."
+            )
+        else:
+            self.statusBar().showMessage("Unknown host key")
+            title = "Unknown host"
+            text = (
+                f"The authenticity of host “{runner.host}” can't be established — "
+                "its key isn't in your known_hosts file.\n\n"
+                "Connect anyway and remember this host's key?"
+            )
+
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle(title)
+        box.setText(text)
+        connect = box.addButton("Connect anyway", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        if box.clickedButton() is not connect:
+            return
+        # A changed key won't be trusted (and ssh disables password auth) while
+        # the stale entry lingers, so drop it; accept-new then re-learns the key.
+        if kind == "changed":
+            runner.forget_hostkey(message)
+        runner.hostkey_policy = SSHRunner.HOSTKEY_ACCEPT_NEW
+        self.refresh()
 
     def _set_state(self, interfaces: list[Interface], dns: list[str] | None = None,
                    dns_search: list[str] | None = None, can_edit_dns: bool = False) -> None:
