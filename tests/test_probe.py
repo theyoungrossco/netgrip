@@ -69,12 +69,36 @@ FIXTURE = [
         "linkinfo": {"info_slave_kind": "bond"},
         "addr_info": [],
     },
+    # A veth pair, both ends in this namespace: vethA reports the peer by
+    # ifindex, vethB by name -- both paths must resolve to each other.
+    {
+        "ifindex": 6, "ifname": "vethA", "link_index": 7,
+        "flags": ["BROADCAST", "MULTICAST", "UP", "LOWER_UP"], "mtu": 1500,
+        "operstate": "UP", "link_type": "ether", "address": "52:54:00:77:88:01",
+        "linkinfo": {"info_kind": "veth"}, "addr_info": [],
+    },
+    {
+        "ifindex": 7, "ifname": "vethB", "link": "vethA",
+        "flags": ["BROADCAST", "MULTICAST", "UP", "LOWER_UP"], "mtu": 1500,
+        "operstate": "UP", "link_type": "ether", "address": "52:54:00:77:88:02",
+        "linkinfo": {"info_kind": "veth"}, "addr_info": [],
+    },
+    # A veth whose peer lives in another namespace (a container): only an
+    # ifindex we can't resolve locally, so it is left unpaired.
+    {
+        "ifindex": 8, "ifname": "vethC", "link_index": 4242,
+        "flags": ["BROADCAST", "MULTICAST", "UP", "LOWER_UP"], "mtu": 1500,
+        "operstate": "UP", "link_type": "ether", "address": "52:54:00:77:88:03",
+        "linkinfo": {"info_kind": "veth"}, "addr_info": [],
+    },
 ]
 
 
 def test_parses_all_interfaces():
     ifaces = parse_addr_json(FIXTURE)
-    assert [i.name for i in ifaces] == ["lo", "eth0", "eth0.100", "bond0", "eth1"]
+    assert [i.name for i in ifaces] == [
+        "lo", "eth0", "eth0.100", "bond0", "eth1", "vethA", "vethB", "vethC",
+    ]
 
 
 def test_loopback():
@@ -104,6 +128,21 @@ def test_vlan():
     assert vlan.kind == "vlan"
     assert vlan.vlan_id == 100
     assert vlan.vlan_parent == "eth0"
+
+
+def test_veth_peers_resolve_both_ends():
+    ifaces = {i.name: i for i in parse_addr_json(FIXTURE)}
+    assert ifaces["vethA"].kind == "veth"
+    # Resolved by ifindex (vethA -> 7) and by name (vethB -> "vethA").
+    assert ifaces["vethA"].peer == "vethB"
+    assert ifaces["vethB"].peer == "vethA"
+
+
+def test_veth_peer_in_other_namespace_is_unpaired():
+    # The container case: the far end isn't a local interface, so no peer.
+    vethc = {i.name: i for i in parse_addr_json(FIXTURE)}["vethC"]
+    assert vethc.kind == "veth"
+    assert vethc.peer is None
 
 
 def test_bond_and_member():

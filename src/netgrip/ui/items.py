@@ -135,6 +135,8 @@ def _iface_detail(iface: Interface) -> list[str]:
         lines.append(f"member of {iface.master}")
     if iface.kind not in ("physical", "loopback", "vlan", "bond", "bridge"):
         lines.append(iface.kind)
+    if iface.peer:
+        lines.append(f"peer {iface.peer}")
     return lines
 
 

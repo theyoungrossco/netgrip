@@ -188,13 +188,16 @@ class Canvas(QGraphicsView):
             )
             scene.addItem(dns_node)
 
-        # Edges: vlan->parent, member->group, interface->its IP groups.
+        # Edges: vlan->parent, member->group, veth peer<->peer, interface->IP
+        # groups. The veth check `name < peer` draws the shared cable once.
         for iface in shown:
             node = if_nodes[iface.name]
             if iface.kind == "vlan" and iface.vlan_parent in if_nodes:
                 scene.addItem(Edge(if_nodes[iface.vlan_parent], node))
             if iface.master and iface.master in if_nodes:
                 scene.addItem(Edge(node, if_nodes[iface.master]))
+            if iface.peer and iface.peer in if_nodes and iface.name < iface.peer:
+                scene.addItem(Edge(node, if_nodes[iface.peer]))
         for group in ip_groups:
             scene.addItem(Edge(if_nodes[group.iface.name], group))
 

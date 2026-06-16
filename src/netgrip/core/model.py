@@ -68,6 +68,10 @@ class Interface:
     vlan_id: int | None = None
     vlan_parent: str | None = None
     bond_mode: str | None = None
+    # The other end of a veth pair, when both ends live in this namespace (the
+    # Proxmox firewall fwln/fwpr case). A container's far end sits in its own
+    # netns and is not visible here, so this stays None for those.
+    peer: str | None = None
     # Per-family default route, keyed by family (4 / 6). See `Gateway`.
     gateways: dict[int, Gateway] = field(default_factory=dict)
     # Per-link DNS, as configured on this interface (systemd-resolved). These
