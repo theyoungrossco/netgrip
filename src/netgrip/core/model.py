@@ -72,6 +72,14 @@ class Interface:
     # Proxmox firewall fwln/fwpr case). A container's far end sits in its own
     # netns and is not visible here, so this stays None for those.
     peer: str | None = None
+    # Bridge VLAN filtering (vlan-aware bridges, e.g. Proxmox), read from
+    # `bridge vlan show`. On the bridge itself: whether it filters by VLAN. On a
+    # member port: its untagged native VLAN (pvid) and the VLANs it carries
+    # tagged. Tags are display tokens ("20", "100-200") since a port may trunk a
+    # whole range.
+    bridge_vlan_aware: bool = False
+    pvid: int | None = None
+    vlan_tags: list[str] = field(default_factory=list)
     # Per-family default route, keyed by family (4 / 6). See `Gateway`.
     gateways: dict[int, Gateway] = field(default_factory=dict)
     # Per-link DNS, as configured on this interface (systemd-resolved). These

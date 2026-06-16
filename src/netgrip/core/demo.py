@@ -75,4 +75,19 @@ def demo_interfaces() -> list[Interface]:
             name="veth-ns", index=9, kind="veth", state="up",
             mac="52:54:00:a1:b2:c8", mtu=1500, peer="veth-host",
         ),
+        # A vlan-aware bridge (as Proxmox sets up): a trunk uplink carrying two
+        # tagged VLANs and a VM tap as an untagged access port on VLAN 20.
+        Interface(
+            name="vmbr0", index=10, kind="bridge", state="up",
+            mac="52:54:00:a1:b2:c9", mtu=1500, bridge_vlan_aware=True,
+        ),
+        Interface(
+            name="eth3", index=11, kind="physical", state="up",
+            mac="52:54:00:a1:b2:ca", mtu=1500, master="vmbr0",
+            vlan_tags=["20", "30"],
+        ),
+        Interface(
+            name="tap200i0", index=12, kind="tun", state="up",
+            mac="52:54:00:a1:b2:cb", mtu=1500, master="vmbr0", pvid=20,
+        ),
     ]

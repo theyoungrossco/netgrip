@@ -121,6 +121,23 @@ class BaseNode(QGraphicsObject):
         self._press_pos = None
 
 
+def _vlan_summary(iface: Interface) -> str | None:
+    """A bridge port's VLAN tags as `bridge vlan show` reports them, or None when
+    it only carries the default untagged VLAN (the common case, not worth ink).
+
+    A trunk reads "tagged 20,30" (plus "untagged N" if its native isn't VLAN 1);
+    a plain access port reads "vlan 20".
+    """
+    if iface.vlan_tags:
+        summary = "tagged " + ",".join(iface.vlan_tags)
+        if iface.pvid not in (None, 1):
+            summary += f"  untagged {iface.pvid}"
+        return summary
+    if iface.pvid not in (None, 1):
+        return f"vlan {iface.pvid}"
+    return None
+
+
 def _iface_detail(iface: Interface) -> list[str]:
     # Gateway and DNS no longer live here: they belong to the per-family IP
     # group (see IpGroup), since that's the protocol that hands them out.
@@ -137,6 +154,9 @@ def _iface_detail(iface: Interface) -> list[str]:
         lines.append(iface.kind)
     if iface.peer:
         lines.append(f"peer {iface.peer}")
+    summary = _vlan_summary(iface)
+    if summary:
+        lines.append(summary)
     return lines
 
 
@@ -183,6 +203,8 @@ class GroupNode(BaseNode):
             lines.append(BOND_MODES.get(iface.bond_mode or "", iface.bond_mode or "bond"))
         else:
             lines.append(iface.kind)
+        if iface.kind == "bridge" and iface.bridge_vlan_aware:
+            lines.append("vlan-aware")
         lines.append(f"{member_count} member{'s' if member_count != 1 else ''}")
         body, border = theme.node("group")
         super().__init__(iface.name, lines, body, border)

@@ -10,6 +10,7 @@ from netgrip.core.probe import (
     _LINKDOMAIN,
     DNS_COMMAND,
     parse_addr_json,
+    parse_bridge_vlan_json,
     parse_resolv_conf,
     parse_resolvectl_links,
     parse_route_json,
@@ -154,6 +155,37 @@ def test_bond_and_member():
     # A slave has linkinfo with only info_slave_kind: still a physical NIC.
     assert member.kind == "physical"
     assert member.master == "bond0"
+
+
+def test_bridge_vlan_aware_flag():
+    payload = [{
+        "ifindex": 10, "ifname": "vmbr0",
+        "flags": ["BROADCAST", "MULTICAST", "UP", "LOWER_UP"], "mtu": 1500,
+        "operstate": "UP", "link_type": "ether", "address": "aa:bb:cc:dd:ee:ff",
+        "linkinfo": {"info_kind": "bridge", "info_data": {"vlan_filtering": 1}},
+        "addr_info": [],
+    }]
+    br = parse_addr_json(payload)[0]
+    assert br.kind == "bridge"
+    assert br.bridge_vlan_aware is True
+
+
+def test_parse_bridge_vlan_json_splits_tagged_and_native():
+    payload = [
+        {"ifname": "eth3", "vlans": [
+            {"vlan": 1, "flags": ["PVID", "Egress Untagged"]},
+            {"vlan": 20},
+            {"vlan": 100, "vlanEnd": 200},
+        ]},
+        {"ifname": "tap200i0", "vlans": [
+            {"vlan": 20, "flags": ["PVID", "Egress Untagged"]},
+        ]},
+    ]
+    table = parse_bridge_vlan_json(payload)
+    # Trunk uplink: VLAN 1 native/untagged, 20 and the 100-200 range tagged.
+    assert table["eth3"] == (1, ["20", "100-200"])
+    # Access port: untagged on VLAN 20, nothing tagged.
+    assert table["tap200i0"] == (20, [])
 
 
 ROUTE_FIXTURE = [

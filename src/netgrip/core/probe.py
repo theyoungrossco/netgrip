@@ -9,6 +9,10 @@ from netgrip.core.model import Address, Gateway, Interface
 from netgrip.core.runner import Runner
 
 PROBE_COMMAND = ["ip", "-details", "-json", "address", "show"]
+# Per-port VLAN membership on vlan-aware bridges (Proxmox and friends). A bonus
+# read: old `bridge` lacks `-json` and plain bridges return nothing useful, so a
+# failure here just leaves the tags blank.
+BRIDGE_VLAN_COMMAND = ["bridge", "-json", "vlan", "show"]
 # Default routes are read per family so an interface can carry both an IPv4 and
 # an IPv6 default at once (each belongs to its own protocol box).
 ROUTE_COMMANDS = {
@@ -52,6 +56,7 @@ def probe(runner: Runner) -> list[Interface]:
         ) from exc
     interfaces = parse_addr_json(payload)
     _enrich_gateways(runner, interfaces)
+    _enrich_bridge_vlans(runner, interfaces)
     return interfaces
 
 
@@ -115,6 +120,49 @@ def _enrich_gateways(runner: Runner, interfaces: list[Interface]) -> None:
             iface = by_name.get(dev)
             if iface is not None:
                 iface.gateways[family] = gateway
+
+
+def _enrich_bridge_vlans(runner: Runner, interfaces: list[Interface]) -> None:
+    try:
+        payload = json.loads(runner.run(BRIDGE_VLAN_COMMAND))
+    except (RuntimeError, ValueError):
+        return  # vlan-filtering info is a bonus; never fail the probe over it
+    if not isinstance(payload, list):
+        return
+    by_name = {i.name: i for i in interfaces}
+    for name, (pvid, tagged) in parse_bridge_vlan_json(payload).items():
+        iface = by_name.get(name)
+        if iface is not None:
+            iface.pvid = pvid
+            iface.vlan_tags = tagged
+
+
+def parse_bridge_vlan_json(payload: list[dict]) -> dict[str, tuple[int | None, list[str]]]:
+    """Map port -> (pvid, tagged VLANs) from `bridge -json vlan show`.
+
+    ``pvid`` is the port's untagged native VLAN; ``tagged`` lists the VLANs it
+    carries with an 802.1q tag (the native, egress-untagged VLAN is excluded).
+    A VLAN range comes through as one ``"100-200"`` token.
+    """
+    table: dict[str, tuple[int | None, list[str]]] = {}
+    for entry in payload:
+        name = entry.get("ifname")
+        if not name:
+            continue
+        pvid: int | None = None
+        tagged: list[str] = []
+        for vlan in entry.get("vlans") or []:
+            vid = vlan.get("vlan")
+            if vid is None:
+                continue
+            flags = vlan.get("flags") or []
+            if "PVID" in flags:
+                pvid = vid
+            if "Egress Untagged" not in flags:
+                end = vlan.get("vlanEnd")
+                tagged.append(f"{vid}-{end}" if end else str(vid))
+        table[name] = (pvid, tagged)
+    return table
 
 
 def parse_route_json(payload: list[dict]) -> dict[str, Gateway]:
@@ -189,6 +237,7 @@ def parse_addr_json(payload: list[dict]) -> list[Interface]:
             vlan_id=info_data.get("id") if kind == "vlan" else None,
             vlan_parent=item.get("link") if kind == "vlan" else None,
             bond_mode=info_data.get("mode") if kind == "bond" else None,
+            bridge_vlan_aware=bool(info_data.get("vlan_filtering")) if kind == "bridge" else False,
         )
         if kind == "veth":
             veth_peers[iface.name] = (item.get("link"), item.get("link_index"))
