@@ -3,8 +3,14 @@
 import os
 import shlex
 
+import pytest
+
+from netgrip.core import runner as runner_mod
 from netgrip.core.runner import (
+    CommandError,
+    LocalRunner,
     SSHRunner,
+    UnconnectedRunner,
     batch_script,
     hostkey_failure,
     is_auth_failure,
@@ -147,3 +153,37 @@ def test_askpass_helper_holds_no_secret():
         body = fh.read()
     assert "hunter2" not in body  # secret comes from the env, not the script
     assert oct(os.stat(path).st_mode)[-3:] == "700"
+
+
+def test_windows_askpass_is_a_secret_free_cmd_helper(monkeypatch):
+    # On Windows ssh can only launch a real program, so the helper is a .cmd
+    # batch file that echoes the password env var — still nothing on disk.
+    monkeypatch.setattr(runner_mod, "IS_WINDOWS", True)
+    monkeypatch.setattr(runner_mod, "_askpass_path", None)  # don't reuse a POSIX helper
+    monkeypatch.delenv("DISPLAY", raising=False)
+    runner = SSHRunner("admin@10.0.0.1")
+    runner.set_password("hunter2")
+    env = runner._ssh_env()
+    helper = env["SSH_ASKPASS"]
+    assert helper.endswith(".cmd")
+    assert env["SSH_ASKPASS_REQUIRE"] == "force"
+    assert "DISPLAY" not in env  # no X11 display invented on Windows
+    with open(helper, encoding="utf-8") as fh:
+        body = fh.read()
+    assert "hunter2" not in body
+    assert "NETGRIP_SSH_PASSWORD" in body
+
+
+def test_local_runner_refuses_privileged_on_windows(monkeypatch):
+    monkeypatch.setattr(runner_mod, "IS_WINDOWS", True)
+    with pytest.raises(CommandError) as exc:
+        LocalRunner().run_privileged([["ip", "link", "set", "eth0", "up"]])
+    assert "Windows" in str(exc.value)
+
+
+def test_unconnected_runner_refuses_everything():
+    runner = UnconnectedRunner()
+    with pytest.raises(CommandError):
+        runner.run(["ip", "addr"])
+    with pytest.raises(CommandError):
+        runner.run_privileged([["ip", "link", "set", "eth0", "up"]])

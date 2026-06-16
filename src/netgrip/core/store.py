@@ -24,9 +24,14 @@ _UNSAFE = re.compile(r"[^A-Za-z0-9_.@-]+")
 
 
 def data_dir() -> Path:
-    base = os.environ.get("XDG_DATA_HOME") or os.path.join(
-        os.path.expanduser("~"), ".local", "share"
-    )
+    base = os.environ.get("XDG_DATA_HOME")
+    if not base:
+        if os.name == "nt":
+            base = os.environ.get("APPDATA") or os.path.join(
+                os.path.expanduser("~"), "AppData", "Roaming"
+            )
+        else:
+            base = os.path.join(os.path.expanduser("~"), ".local", "share")
     return Path(base) / APP_DIR
 
 

@@ -34,10 +34,12 @@ from netgrip.core.model import (
 )
 from netgrip.core.probe import apply_link_dns, probe, probe_dns
 from netgrip.core.runner import (
+    IS_WINDOWS,
     DemoRunner,
     LocalRunner,
     Runner,
     SSHRunner,
+    UnconnectedRunner,
     hostkey_failure,
     is_auth_failure,
 )
@@ -66,6 +68,7 @@ from netgrip.ui.items import (
 from netgrip.ui.worker import run_in_background
 
 _LOCAL = "__local__"
+_NONE = "__none__"
 _DEMO = "__demo__"
 _CUSTOM = "__custom__"
 
@@ -77,7 +80,9 @@ class MainWindow(QMainWindow):
         self.setWindowIcon(QIcon.fromTheme("network-wired"))
         self.resize(1100, 720)
 
-        self.runner: Runner = LocalRunner()
+        # Windows has no managed localhost: start unconnected and let the user
+        # pick an SSH host instead of probing the local machine.
+        self.runner: Runner = UnconnectedRunner() if IS_WINDOWS else LocalRunner()
         self.state: HostState | None = None
         self._busy = False
 
@@ -114,7 +119,10 @@ class MainWindow(QMainWindow):
         bar.addWidget(QLabel(" Host: "))
         self.host_combo = QComboBox()
         self.host_combo.setMinimumWidth(220)
-        self.host_combo.addItem("Local (this machine)", _LOCAL)
+        if IS_WINDOWS:
+            self.host_combo.addItem("Select a host…", _NONE)
+        else:
+            self.host_combo.addItem("Local (this machine)", _LOCAL)
         ssh_hosts = ssh_config_hosts()
         if ssh_hosts:
             self.host_combo.insertSeparator(self.host_combo.count())
@@ -204,6 +212,8 @@ class MainWindow(QMainWindow):
             self._connect_to(DemoRunner())
         elif data == _LOCAL:
             self._connect_to(LocalRunner())
+        elif data == _NONE:
+            self._connect_to(UnconnectedRunner())
         elif data:
             self._connect_to(SSHRunner(data))
 
@@ -216,6 +226,11 @@ class MainWindow(QMainWindow):
         if self._busy:
             return
         runner = self.runner
+        if isinstance(runner, UnconnectedRunner):
+            self.state = None
+            self.canvas.populate(None, self.loopback_action.isChecked())
+            self.statusBar().showMessage("Select a host to connect over SSH.")
+            return
         if isinstance(runner, DemoRunner):
             self._set_state(demo_interfaces(), DEMO_DNS, DEMO_DNS_SEARCH, can_edit_dns=False)
             return

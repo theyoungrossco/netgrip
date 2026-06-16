@@ -21,6 +21,15 @@ WRITE_TIMEOUT = 60
 # `ip` lives in sbin on some distros, which user sessions often lack in PATH.
 _EXTRA_PATH = "/usr/sbin:/sbin:/usr/local/sbin"
 
+# NetGrip runs on Windows purely as an SSH client: there is no local `ip`, no
+# sudo/pkexec and no managed localhost there, so local management is disabled
+# and only the SSH path is offered.
+IS_WINDOWS = os.name == "nt"
+
+# Keep the helper ssh/ssh-keygen processes from flashing a console window when
+# NetGrip is launched as a GUI app on Windows (no-op elsewhere).
+_POPEN_EXTRA = {"creationflags": subprocess.CREATE_NO_WINDOW} if IS_WINDOWS else {}
+
 
 class CommandError(RuntimeError):
     def __init__(self, command: str, returncode: int, stderr: str):
@@ -87,17 +96,29 @@ _askpass_path: str | None = None
 def _askpass_helper() -> str:
     """Path to a tiny, secret-free SSH_ASKPASS helper, created once per run.
 
-    It is written into a private 0700 temp dir (mkdtemp, so no symlink race)
-    and merely prints whatever is in ``$NETGRIP_SSH_PASSWORD``.
+    It is written into a private temp dir (mkdtemp, so no symlink race) and
+    merely echoes whatever is in ``$NETGRIP_SSH_PASSWORD`` — the password lives
+    only in the ssh process environment, never on disk. On Windows the helper is
+    a ``.cmd`` batch file (the form ssh can launch there); elsewhere it is a
+    0700 ``/bin/sh`` script.
     """
     global _askpass_path
     if _askpass_path and os.path.exists(_askpass_path):
         return _askpass_path
     directory = tempfile.mkdtemp(prefix="netgrip-")
-    path = os.path.join(directory, "askpass")
-    with open(path, "w", encoding="utf-8") as fh:
-        fh.write(f'#!/bin/sh\nexec printf \'%s\\n\' "${_ASKPASS_ENV}"\n')
-    os.chmod(path, 0o700)
+    if IS_WINDOWS:
+        path = os.path.join(directory, "askpass.cmd")
+        # Delayed expansion (!VAR!) so cmd metacharacters in the password
+        # (& | < > ^ %) are echoed literally instead of being re-parsed.
+        with open(path, "w", encoding="utf-8", newline="\r\n") as fh:
+            fh.write(
+                f"@echo off\nsetlocal EnableDelayedExpansion\necho(!{_ASKPASS_ENV}!\n"
+            )
+    else:
+        path = os.path.join(directory, "askpass")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(f'#!/bin/sh\nexec printf \'%s\\n\' "${_ASKPASS_ENV}"\n')
+        os.chmod(path, 0o700)
     _askpass_path = path
     return path
 
@@ -142,6 +163,13 @@ class LocalRunner(Runner):
     def run_privileged(self, commands: list[list[str]]) -> str:
         if not commands:
             return ""
+        if IS_WINDOWS:
+            raise CommandError(
+                batch_script(commands),
+                1,
+                "NetGrip can't manage the local machine on Windows; connect to a "
+                "Linux host over SSH instead.",
+            )
         if os.geteuid() == 0:
             return "".join(self.run(argv) for argv in commands)
         wrapper = self._pick_escalation()
@@ -236,7 +264,8 @@ class SSHRunner(Runner):
         env = dict(os.environ)
         env["SSH_ASKPASS"] = _askpass_helper()
         env["SSH_ASKPASS_REQUIRE"] = "force"  # use askpass even with a tty present
-        env.setdefault("DISPLAY", ":0")  # older ssh only consults askpass if DISPLAY is set
+        if not IS_WINDOWS:
+            env.setdefault("DISPLAY", ":0")  # older ssh only consults askpass if DISPLAY is set
         env[_ASKPASS_ENV] = self._password
         return env
 
@@ -261,6 +290,7 @@ class SSHRunner(Runner):
             capture_output=True,
             text=True,
             timeout=READ_TIMEOUT,
+            **_POPEN_EXTRA,
         )
 
     def _run_remote(self, remote_command: str) -> str:
@@ -275,6 +305,7 @@ class SSHRunner(Runner):
                 # Detach from any controlling terminal so ssh asks the askpass
                 # helper for the password instead of trying to read a tty.
                 start_new_session=self._password is not None,
+                **_POPEN_EXTRA,
             )
         except FileNotFoundError as exc:
             raise CommandError("ssh", 127, "ssh client not found on this machine") from exc
@@ -303,6 +334,22 @@ class SSHRunner(Runner):
         # -n: never prompt. An interactive password prompt cannot work through
         # BatchMode ssh, so passwordless sudo (or root login) is required.
         return self._run_remote("sudo -n sh -c " + shlex.quote(script))
+
+
+class UnconnectedRunner(Runner):
+    """No host chosen yet — the startup state where local management is absent
+    (e.g. Windows). The UI special-cases it: refreshing shows an empty canvas
+    and a "pick a host" prompt rather than probing anything."""
+
+    label = "no host"
+
+    def run(self, argv: list[str]) -> str:
+        raise CommandError(
+            shlex.join(argv), 1, "No host selected — choose one to connect over SSH."
+        )
+
+    def run_privileged(self, commands: list[list[str]]) -> str:
+        raise CommandError(batch_script(commands), 1, "No host selected.")
 
 
 class DemoRunner(Runner):

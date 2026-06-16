@@ -32,6 +32,12 @@ room to add your own.
 It manages the local machine, or — using your existing SSH config, keys and
 agent — any remote Linux machine you can reach with `ssh`.
 
+NetGrip also runs on **Windows** as an SSH client only. There's no local Linux
+stack to manage there, so the *Local* option is hidden: you pick a host from
+your `~/.ssh/config` (or type `user@host`) and connect over the built-in
+Windows `ssh`, authenticating with your keys/agent or a password you enter when
+you select the host.
+
 ![NetGrip's demo host: two NICs bonded with LACP, a VLAN on the bond, per-family IPv4/IPv6 group boxes carrying their gateway and DNS, and a System DNS box listing where each resolver comes from](docs/img/screenshot-demo.png)
 
 ## How it works
@@ -68,6 +74,13 @@ or with [pipx](https://pipx.pypa.io/): `pipx install git+https://github.com/they
 
 Requirements: Linux, Python ≥ 3.10, iproute2 ≥ 4.14 (any distro from the
 last several years). Remote hosts need only `iproute2` and an SSH server.
+
+To use NetGrip as a remote control from **Windows**, install Python ≥ 3.10 and
+the built-in [OpenSSH client](https://learn.microsoft.com/windows-server/administration/openssh/openssh_install_firstuse)
+(`ssh.exe`), then `pip install`. Local management is unavailable on Windows;
+the *Local* option is hidden and only SSH hosts are offered. Key/agent auth via
+`~/.ssh/config` is the recommended path; password login depends on the Windows
+OpenSSH build honouring `SSH_ASKPASS` (it does on most current builds).
 
 Distribution packages (apt and friends) are a stated goal — see
 [docs/PACKAGING.md](docs/PACKAGING.md).
