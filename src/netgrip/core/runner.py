@@ -94,20 +94,42 @@ def is_auth_failure(message: str) -> bool:
     return any(m in lowered for m in ("password", "keyboard-interactive", "please try again"))
 
 
-# Env var the askpass helper echoes. The password lives only in the ssh
-# process environment (same-user readable), never in the script or on disk.
-_ASKPASS_ENV = "NETGRIP_SSH_PASSWORD"
+class NeedsPassword(Exception):
+    """Raised internally when local escalation needs a sudo password we don't
+    have yet. The UI catches this (via ``LocalRunner.escalation_status``) to
+    prompt for one and cache it, instead of letting the action fail."""
+
+
+def sudo_needs_password(stderr: str) -> bool:
+    """True when ``sudo -n`` failed *because it wanted a password* — i.e. the
+    user is a sudoer who just hasn't authenticated, as opposed to not being a
+    sudoer at all (in which case we should fall back to pkexec, not prompt)."""
+    lowered = stderr.lower()
+    return "password is required" in lowered or "a terminal is required" in lowered
+
+
+def sudo_auth_failed(message: str) -> bool:
+    """True when a privileged run failed because the cached sudo password was
+    wrong, so the UI can clear it and re-prompt rather than loop on a bad one."""
+    return "incorrect password" in message.lower()
+
+
+# Env var the askpass helper echoes, shared by the ssh and the local-sudo paths.
+# The password lives only in the (same-user readable) process environment of the
+# ssh/sudo child, never in a script or on disk.
+_ASKPASS_ENV = "NETGRIP_ASKPASS"
 _askpass_path: str | None = None
 
 
 def _askpass_helper() -> str:
-    """Path to a tiny, secret-free SSH_ASKPASS helper, created once per run.
+    """Path to a tiny, secret-free askpass helper, created once per run.
 
-    It is written into a private temp dir (mkdtemp, so no symlink race) and
-    merely echoes whatever is in ``$NETGRIP_SSH_PASSWORD`` — the password lives
-    only in the ssh process environment, never on disk. On Windows the helper is
-    a ``.cmd`` batch file (the form ssh can launch there); elsewhere it is a
-    0700 ``/bin/sh`` script.
+    Used as SSH_ASKPASS for ssh and SUDO_ASKPASS for local sudo. It is written
+    into a private temp dir (mkdtemp, so no symlink race) and merely echoes
+    whatever is in ``$NETGRIP_ASKPASS`` — the password lives only in the ssh/sudo
+    process environment, never on disk. On Windows the helper is a ``.cmd`` batch
+    file (the form ssh can launch there); elsewhere it is a 0700 ``/bin/sh``
+    script.
     """
     global _askpass_path
     if _askpass_path and os.path.exists(_askpass_path):
@@ -152,9 +174,38 @@ class LocalRunner(Runner):
 
     def __init__(self) -> None:
         self._escalation: list[str] | None = None
+        self._password: str | None = None
         env = dict(os.environ)
         env["PATH"] = env.get("PATH", "") + os.pathsep + _EXTRA_PATH
         self._env = env
+
+    def set_password(self, password: str | None) -> None:
+        """Cache (or, with None, forget) the sudo password for this session, so
+        escalation is authenticated once rather than prompted on every action.
+        Forgetting also drops the resolved escalation so it is re-evaluated."""
+        self._password = password or None
+        self._escalation = None
+
+    def had_password(self) -> bool:
+        return self._password is not None
+
+    def escalation_status(self) -> str:
+        """How root can be reached right now, without prompting per action:
+        ``"ready"`` (already root, passwordless sudo, or a cached password),
+        ``"needs_password"`` (a sudoer who must authenticate first), or
+        ``"unavailable"`` (no way to escalate). Lets the UI prompt once, up
+        front, instead of letting a privileged run fail."""
+        if IS_WINDOWS:
+            return "unavailable"
+        if os.geteuid() == 0:
+            return "ready"
+        try:
+            self._pick_escalation()
+        except NeedsPassword:
+            return "needs_password"
+        except CommandError:
+            return "unavailable"
+        return "ready"
 
     def run(self, argv: list[str]) -> str:
         try:
@@ -179,7 +230,12 @@ class LocalRunner(Runner):
             )
         if os.geteuid() == 0:
             return "".join(self.run(argv) for argv in commands)
-        wrapper = self._pick_escalation()
+        try:
+            wrapper = self._pick_escalation()
+        except NeedsPassword as exc:
+            raise CommandError(
+                batch_script(commands), 1, "An administrator password is required."
+            ) from exc
         script = batch_script(commands)
         try:
             proc = subprocess.run(
@@ -187,7 +243,7 @@ class LocalRunner(Runner):
                 capture_output=True,
                 text=True,
                 timeout=WRITE_TIMEOUT,
-                env=self._env,
+                env=self._escalation_env(wrapper),
             )
         except FileNotFoundError as exc:
             raise CommandError(script, 127, str(exc)) from exc
@@ -195,14 +251,35 @@ class LocalRunner(Runner):
             raise CommandError(script, proc.returncode, proc.stderr or proc.stdout)
         return proc.stdout
 
+    def _escalation_env(self, wrapper: list[str]) -> dict[str, str]:
+        """Base env, plus the askpass wiring when we drive sudo with a cached
+        password (``sudo -A``). The password reaches sudo only through the
+        helper's environment, never the command line or disk."""
+        if wrapper[:2] != ["sudo", "-A"]:
+            return self._env
+        env = dict(self._env)
+        env["SUDO_ASKPASS"] = _askpass_helper()
+        env[_ASKPASS_ENV] = self._password or ""
+        return env
+
     def _pick_escalation(self) -> list[str]:
         if self._escalation is not None:
             return self._escalation
         if shutil.which("sudo"):
-            check = subprocess.run(["sudo", "-n", "true"], capture_output=True)
+            check = subprocess.run(["sudo", "-n", "true"], capture_output=True, text=True)
             if check.returncode == 0:
                 self._escalation = ["sudo", "-n"]
                 return self._escalation
+            # A sudoer who just needs to authenticate: drive sudo with the cached
+            # password (via askpass) so we prompt once, not every action — and
+            # sudo's own timestamp then skips most re-auths. Without a password
+            # yet, ask the UI to collect one. (If the failure isn't about a
+            # password, the user likely isn't a sudoer; fall through to pkexec.)
+            if sudo_needs_password(check.stderr or ""):
+                if self._password is not None:
+                    self._escalation = ["sudo", "-A"]
+                    return self._escalation
+                raise NeedsPassword()
         has_display = os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
         if shutil.which("pkexec") and has_display:
             self._escalation = ["pkexec"]

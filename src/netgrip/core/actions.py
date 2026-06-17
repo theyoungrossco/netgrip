@@ -9,8 +9,19 @@ from __future__ import annotations
 
 import ipaddress
 import re
+import shlex
 
 from netgrip.core.model import Interface
+
+# A "Try" applies a change to the running config but arms an automatic revert on
+# the *host* after a timeout, unless the user keeps it. The reverter runs
+# host-side and fully detached, so it still fires if the client process dies or
+# the SSH connection drops mid-decision — the safety net that stops a bad change
+# (wrong gateway, an address moved off your own uplink) from locking you out of
+# a remote box. The client normally reverts at its own shorter countdown; this
+# host timer is the backup (the UI sets it a little longer so the client wins
+# the race in the normal case). State is a single sentinel file per attempt.
+TRY_STATE_DIR = "/tmp/netgrip-try"
 
 # Kernel bonding modes, keyed by the value `ip link` expects.
 BOND_MODES = {
@@ -68,6 +79,16 @@ def plan_add_addresses(dev: str, cidrs: list[str]) -> list[list[str]]:
 
 def plan_remove_addresses(dev: str, cidrs: list[str]) -> list[list[str]]:
     return [["ip", "address", "del", cidr, "dev", dev] for cidr in cidrs]
+
+
+def plan_restore_addresses(dev: str, cidrs: list[str]) -> list[list[str]]:
+    """Ensure addresses are present — for *reverting* a removal.
+
+    Uses ``ip address replace`` (add-or-update), so it never fails if the
+    address is already there. That matters because a DHCP/RA client can re-add a
+    lease we removed during a Try; a plain ``add`` would then abort the revert
+    with "Address already assigned", which is exactly the wrong moment to error."""
+    return [["ip", "address", "replace", cidr, "dev", dev] for cidr in cidrs]
 
 
 def plan_move_addresses(src: str, dst: str, cidrs: list[str]) -> list[list[str]]:
@@ -178,6 +199,61 @@ def plan_set_bond_mode(bond: str, mode: str) -> list[list[str]]:
         ["ip", "link", "set", "dev", bond, "type", "bond", "mode", mode],
         ["ip", "link", "set", "dev", bond, "up"],
     ]
+
+
+def _try_sentinel(token: str) -> str:
+    return f"{TRY_STATE_DIR}/{token}"
+
+
+def _join_plan(plan: list[list[str]]) -> str:
+    """Join a plan into one ``&&``-chained shell fragment (no quoting surprises:
+    every argv is shlex-quoted), for the *forward* part of the Try wrapper —
+    fail-fast, so a failing step aborts the rest (and never arms the reverter)."""
+    return " && ".join(shlex.join(argv) for argv in plan)
+
+
+def _join_revert(plan: list[list[str]]) -> str:
+    """Join a *revert* plan with ``;`` rather than ``&&``: recovery is
+    best-effort, so one benign step (e.g. deleting an address the kernel already
+    dropped) must not stop the remaining steps from restoring the rest."""
+    return "; ".join(shlex.join(argv) for argv in plan)
+
+
+def plan_try(forward: list[list[str]], revert: list[list[str]], token: str,
+             *, timeout: int = 70) -> list[list[str]]:
+    """Apply ``forward`` now, then arm a detached host-side revert.
+
+    Returns a one-command plan (so it still confirms and runs as a single batch).
+    It creates a sentinel file for ``token``, runs ``forward``, then launches a
+    ``setsid`` background job that sleeps ``timeout`` seconds and reverts *only
+    if the sentinel still exists*, then clears it. Keeping the change is just
+    removing the sentinel (:func:`plan_keep`); reverting early removes it and
+    runs the revert at once (:func:`plan_revert_now`). Because the reverter is
+    detached (own session, stdio to /dev/null) it survives the SSH channel
+    closing, which is the whole point — a lost connection still rolls back."""
+    sentinel = shlex.quote(_try_sentinel(token))
+    reverter = (
+        f"sleep {int(timeout)}; "
+        f"if [ -e {sentinel} ]; then {_join_revert(revert)}; fi; "
+        f"rm -f {sentinel}"
+    )
+    script = (
+        f"mkdir -p {shlex.quote(TRY_STATE_DIR)} && touch {sentinel} && "
+        f"{{ {_join_plan(forward)}; }} && "
+        f"setsid sh -c {shlex.quote(reverter)} </dev/null >/dev/null 2>&1 &"
+    )
+    return [["sh", "-c", script]]
+
+
+def plan_keep(token: str) -> list[list[str]]:
+    """Keep a tried change: drop the sentinel so the armed revert no-ops."""
+    return [["sh", "-c", f"rm -f {shlex.quote(_try_sentinel(token))}"]]
+
+
+def plan_revert_now(token: str, revert: list[list[str]]) -> list[list[str]]:
+    """Revert a tried change immediately and disarm its host-side timer."""
+    sentinel = shlex.quote(_try_sentinel(token))
+    return [["sh", "-c", f"rm -f {sentinel}; {_join_revert(revert)}"]]
 
 
 def plan_move_vlan(vlan: Interface, new_parent: str) -> list[list[str]]:

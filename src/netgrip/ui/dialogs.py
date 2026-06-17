@@ -5,7 +5,7 @@ from __future__ import annotations
 import ipaddress
 import shlex
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QPlainTextEdit,
+    QPushButton,
     QRadioButton,
     QSpinBox,
     QVBoxLayout,
@@ -35,6 +36,14 @@ from netgrip.core.actions import (
 )
 from netgrip.core.model import Interface, ip_family
 from netgrip.ui import theme
+
+# The choice a user makes in the command-confirmation dialog. Apply changes the
+# running config and leaves it; Try does the same but auto-reverts after a
+# timeout unless kept (see TryCountdownDialog); cancel does nothing. Save is not
+# here — it is a host-wide toolbar action that commits all unsaved changes.
+CONFIRM_CANCEL = ""
+CONFIRM_APPLY = "apply"
+CONFIRM_TRY = "try"
 
 
 def _error_label() -> QLabel:
@@ -250,6 +259,17 @@ class IpGroupDialog(QDialog):
         self._family = family
         gw = iface.gateway_for(family)
         dyn_addr = next((a for a in iface.addresses_for(family) if a.dynamic), None)
+        # The link's existing static address for this family (first global,
+        # non-dynamic one). Pre-filling Static with it means an interface that is
+        # already statically configured opens *showing* that address as Static,
+        # rather than silently defaulting to an empty Dynamic field — which hid
+        # the current config and (with the 0.2 Dynamic=teardown) would risk
+        # wiping it on a no-touch OK. A DHCP/RA lease still wins (Dynamic).
+        static_addr = next(
+            (a for a in iface.addresses_for(family) if not a.dynamic and a.scope == "global"),
+            None,
+        )
+        prefill_static = initial_static or (static_addr.cidr if static_addr else "")
         # Results read by the caller after exec():
         self.address_static = False
         self.new_static_address = ""
@@ -266,14 +286,15 @@ class IpGroupDialog(QDialog):
         # starting a DHCP client is the 0.2 backend, so only Static applies a
         # change today.
         self._addr_field = DynamicStaticField(
-            current=dyn_addr.cidr if dyn_addr else initial_static,
-            is_dynamic=bool(dyn_addr) or not initial_static,
+            current=dyn_addr.cidr if dyn_addr else prefill_static,
+            is_dynamic=bool(dyn_addr) or not prefill_static,
             placeholder="e.g. 192.168.1.20/24" if family == 4 else "e.g. 2001:db8::20/64",
         )
         form.addRow("Addressing:", self._addr_field)
         addr_hint = QLabel(
-            "Static adds a fixed address; obtaining one via DHCP/RA needs the "
-            "0.2 backend."
+            "Static replaces any DHCP/RA address on this family. Until you Save "
+            "it, a running DHCP client may hand the address back; obtaining one "
+            "via DHCP/RA (the Dynamic direction) needs the 0.2 backend."
         )
         addr_hint.setStyleSheet("color: #777;")
         addr_hint.setWordWrap(True)
@@ -541,10 +562,18 @@ class BondDialog(QDialog):
         self.accept()
 
 
-def confirm_commands(parent, title: str, commands: list[list[str]], host_label: str) -> bool:
-    """Show the exact commands a plan will run and ask for confirmation."""
+def confirm_commands(parent, title: str, commands: list[list[str]], host_label: str,
+                     *, allow_try: bool = False, try_seconds: int = 60) -> str:
+    """Show the exact commands a plan will run and ask how to apply it.
+
+    Returns one of ``CONFIRM_APPLY`` / ``CONFIRM_TRY`` / ``CONFIRM_CANCEL``.
+    *Apply* runs the plan and leaves it; *Try* (offered only when ``allow_try``,
+    i.e. the gesture has a safe inverse) runs it but auto-reverts after
+    ``try_seconds`` unless kept. Neither persists across reboots — that is the
+    toolbar's Save."""
     dialog = QDialog(parent)
     dialog.setWindowTitle(title)
+    choice = CONFIRM_CANCEL
     layout = QVBoxLayout(dialog)
     layout.addWidget(QLabel(f"netgrip will run this on <b>{host_label}</b> (as root):"))
 
@@ -557,19 +586,98 @@ def confirm_commands(parent, title: str, commands: list[list[str]], host_label: 
     layout.addWidget(text)
 
     note = QLabel(
-        "Changes apply to the running system only and are not persisted "
-        "across reboots (see the roadmap)."
+        (f"<b>Try</b> applies this now and automatically reverts after "
+         f"{try_seconds}s unless you keep it — a safe way to test a change that "
+         f"could drop your connection.<br><b>Apply</b> applies it and leaves it. "
+         if allow_try else "")
+        + "Changes affect the running system only; use <b>Save</b> (toolbar) to "
+        "persist them across reboots."
     )
     note.setStyleSheet("color: #777;")
     note.setWordWrap(True)
     layout.addWidget(note)
 
-    buttons = QDialogButtonBox(
-        QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-    )
-    buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Run")
-    buttons.accepted.connect(dialog.accept)
-    buttons.rejected.connect(dialog.reject)
-    layout.addWidget(buttons)
+    buttons = QHBoxLayout()
+    buttons.addStretch(1)
+    cancel_btn = QPushButton("Cancel")
+    cancel_btn.clicked.connect(dialog.reject)
+    buttons.addWidget(cancel_btn)
 
-    return dialog.exec() == QDialog.DialogCode.Accepted
+    def pick(value: str) -> None:
+        nonlocal choice
+        choice = value
+        dialog.accept()
+
+    if allow_try:
+        try_btn = QPushButton(f"Try ({try_seconds}s)")
+        try_btn.clicked.connect(lambda: pick(CONFIRM_TRY))
+        buttons.addWidget(try_btn)
+    apply_btn = QPushButton("Apply")
+    apply_btn.setDefault(True)
+    apply_btn.clicked.connect(lambda: pick(CONFIRM_APPLY))
+    buttons.addWidget(apply_btn)
+    layout.addLayout(buttons)
+
+    dialog.exec()
+    return choice
+
+
+class TryCountdownDialog(QDialog):
+    """Asks whether to keep a *tried* change before its automatic revert fires.
+
+    The change is already on the running config; this counts down and offers
+    **Keep** (cancel the revert) or **Revert now**. Timing out — or closing the
+    dialog — means revert, the safe default. The matching host-side timer (armed
+    a little longer, see actions.plan_try) is the backup if this client dies."""
+
+    def __init__(self, parent, title: str, seconds: int):
+        super().__init__(parent)
+        self.setWindowTitle(f"Trying: {title}")
+        self.kept = False
+        self._remaining = seconds
+
+        layout = QVBoxLayout(self)
+        self._label = QLabel()
+        self._label.setWordWrap(True)
+        self._label.setMinimumWidth(380)
+        layout.addWidget(self._label)
+
+        row = QHBoxLayout()
+        row.addStretch(1)
+        revert_btn = QPushButton("Revert now")
+        revert_btn.clicked.connect(self._revert)
+        row.addWidget(revert_btn)
+        keep_btn = QPushButton("Keep")
+        keep_btn.setDefault(True)
+        keep_btn.clicked.connect(self._keep)
+        row.addWidget(keep_btn)
+        layout.addLayout(row)
+
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._tick)
+        self._timer.start(1000)
+        self._render()
+
+    def _render(self) -> None:
+        self._label.setText(
+            f"Applied to the running config. Reverting automatically in "
+            f"<b>{self._remaining}s</b> unless you keep it."
+        )
+
+    def _tick(self) -> None:
+        self._remaining -= 1
+        if self._remaining <= 0:
+            self._finish(kept=False)
+        else:
+            self._render()
+
+    def _keep(self) -> None:
+        self._finish(kept=True)
+
+    def _revert(self) -> None:
+        self._finish(kept=False)
+
+    def _finish(self, *, kept: bool) -> None:
+        self._timer.stop()
+        self.kept = kept
+        self.accept()

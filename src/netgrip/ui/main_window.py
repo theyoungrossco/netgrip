@@ -5,6 +5,7 @@ into confirmed command plans.
 from __future__ import annotations
 
 import ipaddress
+import secrets
 from functools import partial
 
 from PySide6.QtCore import QPoint, QPointF, QSettings, Qt
@@ -23,7 +24,8 @@ from PySide6.QtWidgets import (
 
 import netgrip
 from netgrip.core import actions
-from netgrip.core.demo import DEMO_DNS, DEMO_DNS_SEARCH, demo_interfaces
+from netgrip.core.backends import Backend, detect_backend
+from netgrip.core.demo import DEMO_BACKEND, DEMO_DNS, DEMO_DNS_SEARCH, demo_interfaces
 from netgrip.core.model import (
     GROUP_KINDS,
     Address,
@@ -42,17 +44,21 @@ from netgrip.core.runner import (
     UnconnectedRunner,
     hostkey_failure,
     is_auth_failure,
+    sudo_auth_failed,
 )
 from netgrip.core.sshhosts import ssh_config_hosts
 from netgrip.ui import theme
 from netgrip.ui.canvas import Canvas
 from netgrip.ui.dialogs import (
+    CONFIRM_CANCEL,
+    CONFIRM_TRY,
     BondDialog,
     DraftVlanDialog,
     IpConfigDialog,
     IpGroupDialog,
     LinkPropertiesDialog,
     ManualDnsDialog,
+    TryCountdownDialog,
     VlanDialog,
     confirm_commands,
 )
@@ -71,6 +77,15 @@ _LOCAL = "__local__"
 _NONE = "__none__"
 _DEMO = "__demo__"
 _CUSTOM = "__custom__"
+
+# A "Try" applies a change to the running config and reverts it automatically
+# unless kept. The client counts down TRY_SECONDS and normally performs the
+# revert itself; the host-side timer (armed by actions.plan_try) sleeps
+# TRY_SECONDS + TRY_GRACE so it only fires as a backup when the client is gone
+# (e.g. the SSH connection dropped) — that extra margin lets the client win the
+# race in the normal case, so the change is reverted exactly once.
+TRY_SECONDS = 60
+TRY_GRACE = 10
 
 
 class MainWindow(QMainWindow):
@@ -98,6 +113,12 @@ class MainWindow(QMainWindow):
         self.canvas.canvas_menu_requested.connect(self._show_canvas_menu)
 
         self._build_toolbar()
+        # Persistent persistence indicator on the right of the status bar: which
+        # subsystem owns config on the current host and whether changes survive a
+        # reboot. Stays put while transient messages scroll on the left.
+        self._backend_label = QLabel()
+        self._backend_label.setContentsMargins(0, 0, 8, 0)
+        self.statusBar().addPermanentWidget(self._backend_label)
         self.statusBar().showMessage("Ready")
 
         if demo:
@@ -229,10 +250,12 @@ class MainWindow(QMainWindow):
         if isinstance(runner, UnconnectedRunner):
             self.state = None
             self.canvas.populate(None, self.loopback_action.isChecked())
+            self._update_backend_indicator(None)
             self.statusBar().showMessage("Select a host to connect over SSH.")
             return
         if isinstance(runner, DemoRunner):
-            self._set_state(demo_interfaces(), DEMO_DNS, DEMO_DNS_SEARCH, can_edit_dns=False)
+            self._set_state(demo_interfaces(), DEMO_DNS, DEMO_DNS_SEARCH,
+                            can_edit_dns=False, backend=DEMO_BACKEND)
             return
         self._set_busy(True, f"Reading interfaces on {runner.label}…")
 
@@ -240,7 +263,8 @@ class MainWindow(QMainWindow):
             interfaces = probe(runner)
             servers, search, can_edit, per_link = probe_dns(runner)
             apply_link_dns(interfaces, per_link)  # per-link DNS onto each group
-            return interfaces, servers, search, can_edit
+            backend = detect_backend(runner)  # which subsystem owns persistent config
+            return interfaces, servers, search, can_edit, backend
 
         run_in_background(
             work,
@@ -319,16 +343,38 @@ class MainWindow(QMainWindow):
         self.refresh()
 
     def _set_state(self, interfaces: list[Interface], dns: list[str] | None = None,
-                   dns_search: list[str] | None = None, can_edit_dns: bool = False) -> None:
+                   dns_search: list[str] | None = None, can_edit_dns: bool = False,
+                   backend: Backend | None = None) -> None:
         self.state = HostState(
             self.runner.label, interfaces,
             list(dns or []), list(dns_search or []), can_edit_dns,
+            backend=backend,
         )
         self.canvas.populate(self.state, self.loopback_action.isChecked())
+        self._update_backend_indicator(backend)
         dns_note = f" · DNS {', '.join(self.state.dns)}" if self.state.dns else ""
         self.statusBar().showMessage(
             f"{self.runner.label}: {len(interfaces)} interfaces{dns_note}"
         )
+
+    def _update_backend_indicator(self, backend: Backend | None) -> None:
+        """Reflect the host's config owner (and whether Save can persist) in the
+        status-bar indicator. A managed host shows its backend in the dim text
+        colour; a runtime-only/unknown host is flagged in the warning colour,
+        since a change there will not survive a reboot."""
+        if backend is None:
+            self._backend_label.clear()
+            self._backend_label.setToolTip("")
+            return
+        colour = theme.text_dim() if backend.persists else theme.error()
+        self._backend_label.setText(f"Persist: {backend.label}")
+        self._backend_label.setStyleSheet(f"color: {colour.name()};")
+        note = (
+            "Save will write persistent configuration through this backend."
+            if backend.persists
+            else "Changes apply at runtime only and are lost on reboot."
+        )
+        self._backend_label.setToolTip(f"{backend.summary}\n\n{note}")
 
     def _set_busy(self, busy: bool, message: str | None = None) -> None:
         self._busy = busy
@@ -342,10 +388,25 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ #
     # applying plans
     # ------------------------------------------------------------------ #
-    def _apply(self, title: str, plan: list[list[str]], on_success=None) -> None:
+    def _apply(self, title: str, plan: list[list[str]], on_success=None,
+               *, revert: list[list[str]] | None = None) -> None:
+        """Confirm and run a plan. When a ``revert`` (inverse) plan is supplied
+        the confirmation offers *Try* — apply now and auto-revert shortly unless
+        kept — alongside *Apply*. Try is for the connection-risky gestures where
+        a wrong value could lock you out; its provisional change does not run
+        ``on_success`` (that side effect belongs to a committed change)."""
         if self._busy or not plan:
             return
-        if not confirm_commands(self, title, plan, self.runner.label):
+        choice = confirm_commands(
+            self, title, plan, self.runner.label,
+            allow_try=bool(revert), try_seconds=TRY_SECONDS,
+        )
+        if choice == CONFIRM_CANCEL:
+            return
+        if not self._ensure_local_escalation():
+            return
+        if choice == CONFIRM_TRY:
+            self._try(title, plan, revert, on_keep=on_success)
             return
         runner = self.runner
         self._set_busy(True, f"{title}…")
@@ -360,7 +421,97 @@ class MainWindow(QMainWindow):
         run_in_background(
             lambda: runner.run_privileged(plan),
             on_done=done,
-            on_error=lambda msg: (self._set_busy(False), self._show_error(msg)),
+            on_error=self._on_privileged_error,
+        )
+
+    def _ensure_local_escalation(self) -> bool:
+        """Before a privileged run on the *local* machine, make sure we can
+        become root — prompting once for a sudo password (then cached for the
+        session) instead of being prompted on every action. Returns False, so
+        the caller aborts, on cancel or when root is unreachable. SSH/demo
+        runners manage their own auth and pass straight through."""
+        runner = self.runner
+        if not isinstance(runner, LocalRunner):
+            return True
+        status = runner.escalation_status()
+        if status == "ready":
+            return True
+        if status == "unavailable":
+            self._show_error(
+                "NetGrip can't gain administrator rights on this machine. Run it "
+                "as root, set up passwordless sudo, or install polkit (pkexec)."
+            )
+            return False
+        return self._prompt_sudo_password(runner)
+
+    def _prompt_sudo_password(self, runner: LocalRunner) -> bool:
+        password, ok = QInputDialog.getText(
+            self, "Authentication required",
+            f"Administrator (sudo) password for {runner.label}:",
+            QLineEdit.EchoMode.Password,
+        )
+        if not ok or not password:
+            return False
+        runner.set_password(password)
+        return True
+
+    def _on_privileged_error(self, message: str) -> None:
+        """Error handler for a privileged run. A wrong cached sudo password is
+        cleared (so the next attempt re-prompts) rather than looping on it."""
+        self._set_busy(False)
+        if isinstance(self.runner, LocalRunner) and sudo_auth_failed(message):
+            self.runner.set_password(None)
+            self._show_error("Incorrect administrator password. Please retry the action.")
+        else:
+            self._show_error(message)
+
+    def _try(self, title: str, plan: list[list[str]], revert: list[list[str]],
+             on_keep=None) -> None:
+        """Apply ``plan`` with an armed host-side auto-revert, then open the
+        Keep/Revert countdown once the change is on the running config. A kept
+        change runs ``on_keep`` (the committed-only side effect, e.g. naming the
+        new address); a reverted one does not."""
+        runner = self.runner
+        token = secrets.token_hex(8)
+        arm = actions.plan_try(plan, revert, token, timeout=TRY_SECONDS + TRY_GRACE)
+        self._set_busy(True, f"{title} (try)…")
+
+        def armed(_result) -> None:
+            self._set_busy(False)
+            self.refresh()  # show the just-applied change before the user decides
+            self._start_try_countdown(title, token, revert, on_keep)
+
+        run_in_background(
+            lambda: runner.run_privileged(arm),
+            on_done=armed,
+            on_error=self._on_privileged_error,
+        )
+
+    def _start_try_countdown(self, title: str, token: str,
+                             revert: list[list[str]], on_keep=None) -> None:
+        dlg = TryCountdownDialog(self, title, TRY_SECONDS)
+        dlg.exec()
+        # Keep just disarms; anything else (Revert now, timeout, closing) reverts
+        # immediately. Both also clear the host-side sentinel so it can't double-
+        # fire later. The client owns the decision; the host timer is the backup.
+        if dlg.kept:
+            finishing, verb = actions.plan_keep(token), "kept"
+        else:
+            finishing, verb = actions.plan_revert_now(token, revert), "reverted"
+        runner = self.runner
+        self._set_busy(True, f"{title}: {verb}…")
+
+        def done(_r) -> None:
+            self._set_busy(False)
+            self.statusBar().showMessage(f"{title}: {verb}")
+            if dlg.kept and on_keep:
+                on_keep()
+            self.refresh()
+
+        run_in_background(
+            lambda: runner.run_privileged(finishing),
+            on_done=done,
+            on_error=self._on_privileged_error,
         )
 
     # ------------------------------------------------------------------ #
@@ -374,11 +525,16 @@ class MainWindow(QMainWindow):
             self._apply(
                 f"Clone IPv{node.family} config to {target_name}",
                 actions.plan_add_addresses(target_name, [node.cidr]),
+                revert=actions.plan_remove_addresses(target_name, [node.cidr]),
             )
         else:
             self._apply(
                 f"Move IPv{node.family} config from {node.parent_name} to {target_name}",
                 actions.plan_move_addresses(node.parent_name, target_name, [node.cidr]),
+                # Inverse: take it off the target and restore it where it came
+                # from (restore, not add, so a re-leased address won't error).
+                revert=(actions.plan_remove_addresses(target_name, [node.cidr])
+                        + actions.plan_restore_addresses(node.parent_name, [node.cidr])),
             )
 
     def _on_nic_dropped(self, node: NicNode, target) -> None:
@@ -387,6 +543,7 @@ class MainWindow(QMainWindow):
             self._apply(
                 f"Add {nic} to {target.iface.name}",
                 actions.plan_add_member(target.iface.name, nic),
+                revert=actions.plan_remove_member(nic),
             )
         else:
             self._new_bond_dialog(preselected=[nic, target.iface.name])
@@ -445,12 +602,14 @@ class MainWindow(QMainWindow):
         menu.addAction(
             f"Add IPv{family} address…", partial(self._add_ip_dialog, iface.name, family)
         )
-        if iface.gateway_for(family):
+        gw = iface.gateway_for(family)
+        if gw:
             menu.addSeparator()
             menu.addAction(
                 f"Clear IPv{family} gateway",
                 partial(self._apply, f"Clear IPv{family} gateway on {iface.name}",
-                        actions.plan_clear_gateway(iface.name, family)),
+                        actions.plan_clear_gateway(iface.name, family),
+                        revert=actions.plan_set_gateway(iface.name, gw.address, family)),
             )
         menu.exec(global_pos)
 
@@ -476,13 +635,15 @@ class MainWindow(QMainWindow):
             menu.addAction(
                 f"Take {iface.name} down",
                 partial(self._apply, f"Take {iface.name} down",
-                        actions.plan_set_link(iface.name, False)),
+                        actions.plan_set_link(iface.name, False),
+                        revert=actions.plan_set_link(iface.name, True)),
             )
         else:
             menu.addAction(
                 f"Bring {iface.name} up",
                 partial(self._apply, f"Bring {iface.name} up",
-                        actions.plan_set_link(iface.name, True)),
+                        actions.plan_set_link(iface.name, True),
+                        revert=actions.plan_set_link(iface.name, False)),
             )
 
     def _fill_nic_menu(self, menu: QMenu, iface: Interface) -> None:
@@ -492,7 +653,8 @@ class MainWindow(QMainWindow):
             menu.addAction(
                 f"Remove from {iface.master}",
                 partial(self._apply, f"Remove {iface.name} from {iface.master}",
-                        actions.plan_remove_member(iface.name)),
+                        actions.plan_remove_member(iface.name),
+                        revert=actions.plan_add_member(iface.master, iface.name)),
             )
         elif iface.kind == "physical":
             menu.addAction(
@@ -509,7 +671,9 @@ class MainWindow(QMainWindow):
                 action = mode_menu.addAction(
                     label,
                     partial(self._apply, f"Set {iface.name} mode to {value}",
-                            actions.plan_set_bond_mode(iface.name, value)),
+                            actions.plan_set_bond_mode(iface.name, value),
+                            revert=(actions.plan_set_bond_mode(iface.name, iface.bond_mode)
+                                    if iface.bond_mode else None)),
                 )
                 action.setCheckable(True)
                 action.setChecked(value == iface.bond_mode)
@@ -520,7 +684,8 @@ class MainWindow(QMainWindow):
             add_menu.addAction(
                 nic.name,
                 partial(self._apply, f"Add {nic.name} to {iface.name}",
-                        actions.plan_add_member(iface.name, nic.name)),
+                        actions.plan_add_member(iface.name, nic.name),
+                        revert=actions.plan_remove_member(nic.name)),
             )
         members = self.state.members_of(iface.name)
         if members:
@@ -658,6 +823,7 @@ class MainWindow(QMainWindow):
                 f"Add IPv{family} config to {ifname}",
                 actions.plan_add_addresses(ifname, [cidr]),
                 on_success=(lambda: self.canvas.set_ip_name(family, cidr, name)) if name else None,
+                revert=actions.plan_remove_addresses(ifname, [cidr]),
             )
 
     def _edit_ip_dialog(self, node: IpNode) -> None:
@@ -671,16 +837,22 @@ class MainWindow(QMainWindow):
         if cidr != node.cidr:
             plan = actions.plan_remove_addresses(parent, [node.cidr]) + \
                 actions.plan_add_addresses(parent, [cidr])
-            self._apply(f"Edit IPv{family} config on {parent}", plan, on_success=rename)
+            self._apply(
+                f"Edit IPv{family} config on {parent}", plan, on_success=rename,
+                revert=(actions.plan_remove_addresses(parent, [cidr])
+                        + actions.plan_restore_addresses(parent, [node.cidr])),
+            )
         else:
             rename()  # only the name changed; no kernel change needed
 
     def _add_vlan_dialog(self, ifname: str) -> None:
         dialog = VlanDialog(self, ifname, self.state.link_names() if self.state else set())
         if dialog.exec():
+            vlan_name = dialog.name or actions.default_vlan_name(ifname, dialog.vlan_id)
             self._apply(
                 f"Create VLAN {dialog.vlan_id} on {ifname}",
                 actions.plan_create_vlan(ifname, dialog.vlan_id, dialog.name),
+                revert=actions.plan_delete_link(vlan_name),
             )
 
     def _draft_iface(self, family: int, cidr: str = "", gateway: str = "",
@@ -774,6 +946,7 @@ class MainWindow(QMainWindow):
             f"Create VLAN {vlan_id} on {parent_name}",
             plan,
             on_success=lambda: self.canvas.remove_draft_vlan(draft_id),
+            revert=actions.plan_delete_link(name),
         )
 
     def _name_ip_dialog(self, node: IpNode) -> None:
@@ -789,7 +962,10 @@ class MainWindow(QMainWindow):
         iface = self.state.get(ifname) if self.state else None
         if iface is None:
             return
-        plan, _changed = self._ipgroup_plan(
+        # A draft is an explicit static config; attaching it does not disturb the
+        # target's DHCP lease (address_static stays False), so it stages rather
+        # than tears down — matching the existing drag-to-attach behaviour.
+        plan, _revert, _changed = self._ipgroup_plan(
             iface, node.family,
             address=node.cidr,
             gateway_static=bool(node.gateway), gateway=node.gateway,
@@ -814,6 +990,7 @@ class MainWindow(QMainWindow):
             f"Detach IPv{family} config from {node.parent_name}",
             actions.plan_remove_addresses(node.parent_name, [cidr]),
             on_success=lambda: self.canvas.add_draft(family, cidr, pos),
+            revert=actions.plan_restore_addresses(node.parent_name, [cidr]),
         )
 
     def _link_properties_dialog(self, iface: Interface) -> None:
@@ -824,47 +1001,83 @@ class MainWindow(QMainWindow):
         if not dlg.exec():
             return
         plan: list[list[str]] = []
+        revert: list[list[str]] = []
         changed: list[str] = []
-        # Link-level changes apply under the current name; rename goes last.
+        # Link-level changes apply under the current name; rename goes last. The
+        # revert undoes them in reverse: rename back first (so the property
+        # restores below address the link by its original name).
+        if dlg.new_name != iface.name:
+            revert += actions.plan_rename_link(dlg.new_name, iface.name, iface.is_up)
         if dlg.mtu != iface.mtu:
             plan += actions.plan_set_mtu(iface.name, dlg.mtu)
+            revert += actions.plan_set_mtu(iface.name, iface.mtu)
             changed.append("MTU")
         if dlg.mac != iface.mac:
             plan += actions.plan_set_mac(iface.name, dlg.mac)
+            revert += actions.plan_set_mac(iface.name, iface.mac)
             changed.append("MAC")
         if dlg.link_alias != iface.alias:
             plan += actions.plan_set_alias(iface.name, dlg.link_alias)
+            revert += actions.plan_set_alias(iface.name, iface.alias)
             changed.append("alias")
         if dlg.new_name != iface.name:
             plan += actions.plan_rename_link(iface.name, dlg.new_name, iface.is_up)
             changed.append("name")
         if plan:
-            self._apply(f"Update {iface.name} ({', '.join(changed)})", plan)
+            self._apply(f"Update {iface.name} ({', '.join(changed)})", plan, revert=revert)
 
     def _ipgroup_plan(self, iface: Interface, family: int, *, address: str = "",
+                      address_static: bool = False,
                       gateway_static: bool = False, gateway: str = "",
                       dns_static: bool = False, dns_servers: list[str] | None = None,
-                      dns_search: list[str] | None = None) -> tuple[list[list[str]], list[str]]:
+                      dns_search: list[str] | None = None,
+                      ) -> tuple[list[list[str]], list[list[str]], list[str]]:
         """Build the plan to bring ``iface``'s IPv``family`` config to a desired
-        state: a static address (added if new), gateway and DNS. Shared by the
-        IPv4/6 settings dialog and by attaching a staged draft. Returns the plan
-        and the list of changed parts (for the confirmation title)."""
+        state: a static address, gateway and DNS. Shared by the IPv4/6 settings
+        dialog and by attaching a staged draft. Returns ``(plan, revert,
+        changed)`` — ``revert`` is the inverse (for Try), ``changed`` names the
+        edited parts (for the confirmation title).
+
+        Choosing Static (``address_static``) also removes any DHCP/RA-assigned
+        address of this family, so Static *replaces* Dynamic instead of stacking
+        a second address on top of the lease. Stopping the DHCP client so it
+        can't re-add the lease is the persistence backend's job (roadmap 4a)."""
         dns_servers = dns_servers or []
         dns_search = dns_search or []
         plan: list[list[str]] = []
+        revert: list[list[str]] = []
         changed: list[str] = []
         if address and not any(a.cidr == address for a in iface.addresses):
             plan += actions.plan_add_addresses(iface.name, [address])
+            revert += actions.plan_remove_addresses(iface.name, [address])
             changed.append("address")
+        if address_static:
+            for dyn in iface.addresses_for(family):
+                # Drop DHCP/RA addresses so Static replaces them — but never the
+                # one equal to the chosen static address: deleting that would
+                # leave the link with no address at all (the user asked to *keep*
+                # it, as static). Making it persistently static is a Save (4a);
+                # at runtime there is nothing safe to do, so it is left in place.
+                if dyn.dynamic and dyn.cidr != address:
+                    plan += actions.plan_remove_addresses(iface.name, [dyn.cidr])
+                    # Restore (replace), not add: a DHCP client may have handed
+                    # the lease back by the time we revert.
+                    revert += actions.plan_restore_addresses(iface.name, [dyn.cidr])
+                    if "address" not in changed:
+                        changed.append("address")
         # Gateway only when Static is chosen; Dynamic leaves the lease alone.
         if gateway_static:
             current = iface.gateway_for(family)
             current_addr = current.address if current else ""
             if gateway and gateway != current_addr:
                 plan += actions.plan_set_gateway(iface.name, gateway, family)
+                revert += (actions.plan_set_gateway(iface.name, current_addr, family)
+                           if current_addr
+                           else actions.plan_clear_gateway(iface.name, family))
                 changed.append("gateway")
             elif not gateway and current:
                 plan += actions.plan_clear_gateway(iface.name, family)
+                revert += actions.plan_set_gateway(iface.name, current.address, family)
                 changed.append("gateway")
         # DNS is per-link: keep the other family's servers when setting this one.
         if dns_static:
@@ -872,8 +1085,10 @@ class MainWindow(QMainWindow):
             combined = other + dns_servers
             if combined != iface.dns or dns_search != iface.dns_search:
                 plan += actions.plan_set_dns(iface.name, combined, dns_search)
+                revert += actions.plan_set_dns(iface.name, list(iface.dns),
+                                               list(iface.dns_search))
                 changed.append("DNS")
-        return plan, changed
+        return plan, revert, changed
 
     def _ipgroup_settings_dialog(self, iface: Interface, family: int) -> None:
         if not self.state:
@@ -881,14 +1096,26 @@ class MainWindow(QMainWindow):
         dlg = IpGroupDialog(self, iface, family, can_edit_dns=self.state.can_edit_dns)
         if not dlg.exec():
             return
-        plan, changed = self._ipgroup_plan(
+        plan, revert, changed = self._ipgroup_plan(
             iface, family,
-            address=dlg.new_static_address,
+            address=dlg.new_static_address, address_static=dlg.address_static,
             gateway_static=dlg.gateway_static, gateway=dlg.gateway,
             dns_static=dlg.dns_static, dns_servers=dlg.dns_servers, dns_search=dlg.dns_search,
         )
         if plan:
-            self._apply(f"Update {iface.name} IPv{family} ({', '.join(changed)})", plan)
+            self._apply(f"Update {iface.name} IPv{family} ({', '.join(changed)})",
+                        plan, revert=revert)
+        elif dlg.address_static and any(
+            a.dynamic and a.cidr == dlg.new_static_address
+            for a in iface.addresses_for(family)
+        ):
+            # Static chosen, but the address is the one DHCP/RA already handed
+            # out: there is nothing safe to change at runtime (deleting it would
+            # drop the link). Making it persistently static is a Save (4a).
+            self.statusBar().showMessage(
+                f"{dlg.new_static_address} is already assigned via DHCP/RA — "
+                "pinning it as static will need Save (coming in 0.2)."
+            )
 
     def _manual_dns_dialog(self) -> None:
         if not self.state:

@@ -1,7 +1,77 @@
 """Command plans built by the actions module."""
 
+import shlex
+
 from netgrip.core import actions
 from netgrip.core.model import Address, Interface
+
+
+def test_try_applies_forward_and_arms_detached_revert():
+    forward = [["ip", "address", "add", "192.168.1.10/24", "dev", "eth1"]]
+    revert = [["ip", "address", "del", "192.168.1.10/24", "dev", "eth1"]]
+    plan = actions.plan_try(forward, revert, "abc123", timeout=70)
+    # One command (so it confirms and runs as a single privileged batch).
+    assert len(plan) == 1 and plan[0][:2] == ["sh", "-c"]
+    script = plan[0][2]
+    sentinel = f"{actions.TRY_STATE_DIR}/abc123"
+    # Forward runs, the sentinel is created first, and the revert is armed behind
+    # a sleep that only fires while the sentinel is present.
+    assert "ip address add 192.168.1.10/24 dev eth1" in script
+    assert f"touch {shlex.quote(sentinel)}" in script
+    assert "sleep 70" in script
+    assert f"[ -e {shlex.quote(sentinel)} ]" in script
+    assert "ip address del 192.168.1.10/24 dev eth1" in script
+    # The reverter must be detached (own session + stdio closed) so it survives
+    # the SSH channel closing — that is what makes a dropped connection recover.
+    assert "setsid" in script
+    assert "</dev/null >/dev/null 2>&1 &" in script
+
+
+def test_restore_uses_replace_so_revert_is_idempotent():
+    # A DHCP client may re-add an address we removed during a Try; the revert
+    # must not fail with "already assigned", so restoration uses replace.
+    plan = actions.plan_restore_addresses("eth0", ["10.0.0.5/24"])
+    assert plan == [["ip", "address", "replace", "10.0.0.5/24", "dev", "eth0"]]
+
+
+def test_revert_join_is_tolerant_not_fail_fast():
+    # Multi-step reverts chain with ';' so a benign failure (deleting an address
+    # already gone) doesn't stop the remaining steps from restoring the rest.
+    revert = [
+        ["ip", "address", "del", "10.0.0.9/24", "dev", "eth1"],
+        ["ip", "address", "replace", "10.0.0.5/24", "dev", "eth0"],
+    ]
+    script = actions.plan_revert_now("tok", revert)[0][2]
+    assert "del 10.0.0.9/24 dev eth1; ip address replace 10.0.0.5/24" in script
+    assert " && ip address replace" not in script  # not fail-fast
+
+
+def test_keep_removes_sentinel_only():
+    plan = actions.plan_keep("abc123")
+    script = plan[0][2]
+    assert script == f"rm -f {shlex.quote(actions.TRY_STATE_DIR + '/abc123')}"
+    assert "sleep" not in script  # keeping never reverts anything
+
+
+def test_revert_now_disarms_then_reverts():
+    revert = [["ip", "address", "del", "192.168.1.10/24", "dev", "eth1"]]
+    plan = actions.plan_revert_now("abc123", revert)
+    script = plan[0][2]
+    sentinel = shlex.quote(actions.TRY_STATE_DIR + "/abc123")
+    # Removes the sentinel (so the armed host timer becomes a no-op) before
+    # running the revert immediately.
+    assert script.startswith(f"rm -f {sentinel};")
+    assert script.endswith("ip address del 192.168.1.10/24 dev eth1")
+
+
+def test_try_quotes_hostile_tokens_and_values():
+    # Plans flow through one shell; nothing in them may break out of it.
+    plan = actions.plan_try([["echo", "; rm -rf /"]], [["echo", "x"]], "t;evil")
+    script = plan[0][2]
+    # The dangerous argv is embedded shlex-quoted, not as raw shell.
+    assert "echo '; rm -rf /'" in script
+    # The token, too, is only ever used inside a quoted sentinel path.
+    assert shlex.quote(actions.TRY_STATE_DIR + "/t;evil") in script
 
 
 def test_move_addresses_deletes_then_adds():

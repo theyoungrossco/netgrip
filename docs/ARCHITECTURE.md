@@ -32,6 +32,7 @@ differs between managing localhost and managing a remote machine.
 |---|---|
 | `model.py` | `Interface`, `Address`, `HostState` dataclasses |
 | `probe.py` | parse `ip -json` address/route output + resolv.conf into the model |
+| `backends.py` | detect the host's persistent-config owner (NetworkManager / systemd-networkd / netplan / runtime) for the persistence indicator |
 | `actions.py` | `plan_*()` functions returning `list[list[str]]` command plans |
 | `runner.py` | `LocalRunner`, `SSHRunner`, `DemoRunner` |
 | `store.py` | JSON persistence of UI state (drafts, positions, box names) |

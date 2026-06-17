@@ -135,7 +135,7 @@ def test_password_switches_off_batchmode_and_sets_askpass_env():
     env = runner._ssh_env()
     assert env is not None
     assert env["SSH_ASKPASS_REQUIRE"] == "force"
-    assert env["NETGRIP_SSH_PASSWORD"] == "hunter2"
+    assert env["NETGRIP_ASKPASS"] == "hunter2"
     assert "askpass" in os.path.basename(env["SSH_ASKPASS"])
     assert runner.had_password()
 
@@ -178,7 +178,7 @@ def test_windows_askpass_is_a_secret_free_cmd_helper(monkeypatch):
     with open(helper, encoding="utf-8") as fh:
         body = fh.read()
     assert "hunter2" not in body
-    assert "NETGRIP_SSH_PASSWORD" in body
+    assert "NETGRIP_ASKPASS" in body
 
 
 def test_local_runner_refuses_privileged_on_windows(monkeypatch):
@@ -194,3 +194,74 @@ def test_unconnected_runner_refuses_everything():
         runner.run(["ip", "addr"])
     with pytest.raises(CommandError):
         runner.run_privileged([["ip", "link", "set", "eth0", "up"]])
+
+
+# -- local escalation / sudo password caching ------------------------------ #
+
+def test_sudo_message_classifiers():
+    assert runner_mod.sudo_needs_password("sudo: a password is required")
+    assert runner_mod.sudo_needs_password("sudo: a terminal is required to read the password")
+    assert not runner_mod.sudo_needs_password("user is not in the sudoers file")
+    assert runner_mod.sudo_auth_failed("sudo: 3 incorrect password attempts")
+    assert not runner_mod.sudo_auth_failed("Cannot assign requested address")
+
+
+class _FakeProc:
+    def __init__(self, returncode=0, stderr=""):
+        self.returncode = returncode
+        self.stderr = stderr
+        self.stdout = ""
+
+
+def _local_runner(monkeypatch, *, sudo_rc, sudo_stderr="", which=("sudo",), display=True):
+    """A LocalRunner whose `sudo -n true` probe and `which` are stubbed, so the
+    escalation choice is exercised without a real sudo/pkexec on the test host."""
+    monkeypatch.setattr(runner_mod.os, "geteuid", lambda: 1000)
+    tools = {name: f"/usr/bin/{name}" for name in which}
+    monkeypatch.setattr(runner_mod.shutil, "which", lambda name: tools.get(name))
+    monkeypatch.setattr(runner_mod.subprocess, "run",
+                        lambda *a, **k: _FakeProc(sudo_rc, sudo_stderr))
+    if display:
+        monkeypatch.setenv("DISPLAY", ":0")
+    else:
+        monkeypatch.delenv("DISPLAY", raising=False)
+        monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    return LocalRunner()
+
+
+def test_local_prefers_passwordless_sudo(monkeypatch):
+    runner = _local_runner(monkeypatch, sudo_rc=0)
+    assert runner.escalation_status() == "ready"
+    assert runner._pick_escalation() == ["sudo", "-n"]
+
+
+def test_local_needs_password_then_caches_and_wires_askpass(monkeypatch):
+    runner = _local_runner(monkeypatch, sudo_rc=1, sudo_stderr="sudo: a password is required")
+    assert runner.escalation_status() == "needs_password"
+
+    runner.set_password("hunter2")
+    assert runner.had_password()
+    assert runner.escalation_status() == "ready"
+    assert runner._pick_escalation() == ["sudo", "-A"]
+    # The secret reaches sudo only through the askpass env, never the argv.
+    env = runner._escalation_env(["sudo", "-A"])
+    assert env["SUDO_ASKPASS"]
+    assert env[runner_mod._ASKPASS_ENV] == "hunter2"
+    assert "hunter2" not in runner._pick_escalation()
+
+    runner.set_password(None)  # a wrong password is cleared -> back to prompting
+    assert runner.escalation_status() == "needs_password"
+
+
+def test_local_non_sudoer_falls_back_to_pkexec(monkeypatch):
+    runner = _local_runner(
+        monkeypatch, sudo_rc=1, sudo_stderr="user is not in the sudoers file",
+        which=("sudo", "pkexec"),
+    )
+    assert runner.escalation_status() == "ready"
+    assert runner._pick_escalation() == ["pkexec"]
+
+
+def test_local_escalation_unavailable_without_sudo_or_pkexec(monkeypatch):
+    runner = _local_runner(monkeypatch, sudo_rc=1, which=(), display=False)
+    assert runner.escalation_status() == "unavailable"

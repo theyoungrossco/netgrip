@@ -6,6 +6,7 @@ run) without root and without touching a real network stack.
 
 from __future__ import annotations
 
+from netgrip.core.backends import parse_backend
 from netgrip.core.model import Address, Gateway, Interface
 
 # Effective resolvers shown in demo mode (as if read from resolv.conf). Each
@@ -13,6 +14,14 @@ from netgrip.core.model import Address, Gateway, Interface
 # provenance: 192.168.1.1 from eth0, 9.9.9.9 from bond0.
 DEMO_DNS = ["192.168.1.1", "9.9.9.9"]
 DEMO_DNS_SEARCH = ["lan.example"]
+
+# The demo host looks like a netplan-rendered server (bonds, bridges, a vlan-
+# aware bridge): show it as netplan over systemd-networkd so the persistence
+# indicator has something representative to display. Built through the real
+# parser so demo and live hosts produce an identical Backend.
+DEMO_BACKEND = parse_backend(
+    "@@NM@@\ninactive\n@@NETWORKD@@\nactive\n@@NETPLAN@@\n01-netcfg.yaml\n"
+)
 
 
 def demo_interfaces() -> list[Interface]:

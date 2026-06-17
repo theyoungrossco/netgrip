@@ -10,6 +10,8 @@ from __future__ import annotations
 import ipaddress
 from dataclasses import dataclass, field
 
+from netgrip.core.backends import Backend
+
 # Interface kinds that an IP configuration or a VLAN can be attached to.
 ATTACHABLE_KINDS = {"physical", "bond", "bridge", "team", "vlan", "loopback"}
 
@@ -123,6 +125,7 @@ class HostState:
     dns_search: list[str] = field(default_factory=list)  # search domains
     can_edit_dns: bool = False  # systemd-resolved (resolvectl) present for per-link DNS
     manual_dns: list[str] = field(default_factory=list)  # user-added extras (from store)
+    backend: Backend | None = None  # which subsystem owns persistent config (see backends.py)
 
     def get(self, name: str) -> Interface | None:
         return next((i for i in self.interfaces if i.name == name), None)

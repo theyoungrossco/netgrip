@@ -43,6 +43,14 @@ The UI gains a per-host indicator of which backend is in use and whether a
 change will persist. Persistent renames/aliases (systemd `.link` files, udev)
 also land here, since they need this backend.
 
+Every mutation grows a three-way choice: **Try** (apply to the running config,
+auto-reverting host-side after a timeout unless kept — the safety net that keeps
+a bad change from locking you out of a remote box), **Apply** (runtime only, as
+today) and **Save** (persist through the detected backend). Progress and the
+milestone breakdown live in [docs/0.2-TEST-PLAN.md](docs/0.2-TEST-PLAN.md);
+backend detection, the persistence indicator and the static pre-fill fix below
+have landed.
+
 - **Make the Addressing "Dynamic" toggle actionable.** Today, picking *Dynamic*
   in the IPv4/IPv6 settings dialog (`IpGroupDialog`) is a pure no-op: switching
   a static interface to DHCP/RA does nothing, because `_ipgroup_plan` only ever
