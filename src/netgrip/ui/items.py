@@ -505,6 +505,17 @@ class RegionNode(QGraphicsObject):
         widest = max((m.boundingRect().width() for m in self._members), default=0.0)
         return widest + 2 * self.OUTER_PAD
 
+    def block_height(self) -> float:
+        """The height this group will span once arranged, computed without
+        moving anything — so the layout engine can size the column before
+        :meth:`arrange` actually places the members. Mirrors arrange()'s sum."""
+        if not self._members:
+            return self.OUTER_PAD + self._header_height()
+        h = self.OUTER_PAD + self._header_height() + self.HEADER_GAP
+        for member in self._members:
+            h += member.boundingRect().height() + self.INNER_GAP
+        return h - self.INNER_GAP + self.OUTER_PAD
+
     def arrange(self, left: float, top: float) -> float:
         """Stack the members vertically under the header, with the frame's left
         edge at ``left`` and top at ``top``; return the height the group spans."""

@@ -8,7 +8,7 @@ from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QPainter
 from PySide6.QtWidgets import QApplication, QGraphicsScene, QGraphicsView
 
-from netgrip.core import store
+from netgrip.core import layout, store
 from netgrip.core.model import HostState
 from netgrip.ui import theme
 from netgrip.ui.items import (
@@ -32,7 +32,7 @@ def _alias_key(family: int, cidr: str) -> str:
     return f"{family}:{cidr}"
 
 MARGIN = 30.0
-COL_W = 300.0
+COL_GAP = 40.0  # horizontal space between layout columns
 V_GAP = 22.0
 # A drop only counts if the dragged box overlaps the target by this share
 # of its own area; less than that is treated as repositioning.
@@ -63,6 +63,10 @@ class Canvas(QGraphicsView):
         self._show_loopback = False
         self._host_label: str | None = None  # whose persisted state is loaded
         self._positions: dict[str, QPointF] = {}  # remembered node positions
+        # While the auto-layout places boxes, suppress the position saver so its
+        # setPos() calls don't overwrite the user's remembered positions: the
+        # store must hold only genuine user placements, never the auto guesses.
+        self._laying_out = False
         self._drafts: list[dict] = []  # {id, family, cidr, pos}
         self._draft_vlans: list[dict] = []  # {id, vlan_id, name, cidrs, pos}
         self._aliases: dict[str, str] = {}  # _alias_key() -> user box name
@@ -137,33 +141,39 @@ class Canvas(QGraphicsView):
             for dv in self._draft_vlans
         ]
 
-        # Parent->children map drives both the edges and the tree layout. An
-        # interface's IP groups sit nearest it (first), then subordinate links.
-        children: dict[str, list] = {name: [] for name in if_nodes}
-        roots: list[BaseNode] = []
+        # Topology graph for the auto-layout. These are exactly the same
+        # relationships drawn as edges below (vlan->parent, member->master,
+        # veth peer<->peer, interface->IP groups), built once so the layout
+        # graph and the drawn cables can never drift apart. The layout engine
+        # itself lives in core.layout (Qt-free) and stays unit-tested.
+        node_by_key: dict[str, BaseNode] = {n.key: n for n in if_nodes.values()}
+        for group in ip_groups:
+            node_by_key[group.key] = group
+
+        graph_edges: list[tuple[str, str]] = []
         for iface in shown:
-            node = if_nodes[iface.name]
+            key = if_nodes[iface.name].key
             if iface.kind == "vlan" and iface.vlan_parent in shown_names:
-                children[iface.vlan_parent].append(node)
-            elif iface.is_group:
-                members = [m.name for m in state.members_of(iface.name) if m.name in shown_names]
-                if members:
-                    children[members[0]].append(node)  # layout under first member
-                else:
-                    roots.append(node)
-            elif iface.master is None or iface.master not in shown_names:
-                roots.append(node)
-            else:
-                roots.append(node)  # enslaved NICs still sit in the first column
-        for name in if_nodes:
-            children[name] = groups_by_iface[name] + children[name]
+                graph_edges.append((if_nodes[iface.vlan_parent].key, key))
+            if iface.master and iface.master in shown_names:
+                graph_edges.append((key, if_nodes[iface.master].key))
+            if iface.peer and iface.peer in shown_names and iface.name < iface.peer:
+                graph_edges.append((key, if_nodes[iface.peer].key))
+        for group in ip_groups:
+            graph_edges.append((if_nodes[group.iface.name].key, group.key))
 
-        # Order: physical NICs first, groups without members, loopback last.
-        def root_rank(n: BaseNode) -> tuple:
-            iface = n.iface  # all roots are interface nodes
-            return (iface.kind == "loopback", iface.kind != "physical", iface.name)
-
-        roots.sort(key=root_rank)
+        # Physical NICs seed the left column; everything flows rightward from
+        # them. The priority order (physical first, loopback last, then by name)
+        # breaks layout ties and orders the vertically-stacked components. An
+        # interface's IP groups follow it, so they sit nearest their link.
+        sources = [if_nodes[i.name].key for i in shown if i.kind == "physical"]
+        ranked = sorted(
+            shown, key=lambda i: (i.kind == "loopback", i.kind != "physical", i.name)
+        )
+        priority: list[str] = []
+        for iface in ranked:
+            priority.append(if_nodes[iface.name].key)
+            priority.extend(g.key for g in groups_by_iface[iface.name])
 
         for node in [*if_nodes.values(), *ip_nodes, *draft_nodes, *draft_vlan_nodes]:
             scene.addItem(node)
@@ -188,25 +198,38 @@ class Canvas(QGraphicsView):
             )
             scene.addItem(dns_node)
 
-        # Edges: vlan->parent, member->group, veth peer<->peer, interface->IP
-        # groups. The veth check `name < peer` draws the shared cable once.
-        for iface in shown:
-            node = if_nodes[iface.name]
-            if iface.kind == "vlan" and iface.vlan_parent in if_nodes:
-                scene.addItem(Edge(if_nodes[iface.vlan_parent], node))
-            if iface.master and iface.master in if_nodes:
-                scene.addItem(Edge(node, if_nodes[iface.master]))
-            if iface.peer and iface.peer in if_nodes and iface.name < iface.peer:
-                scene.addItem(Edge(node, if_nodes[iface.peer]))
-        for group in ip_groups:
-            scene.addItem(Edge(if_nodes[group.iface.name], group))
+        # Draw those same relationships as straight, centre-to-centre cables
+        # under the boxes (the veth `name < peer` guard already drew its shared
+        # cable once when graph_edges was built).
+        for a, b in graph_edges:
+            scene.addItem(Edge(node_by_key[a], node_by_key[b]))
 
-        # Leave room at the top for the DNS frame's title bar; the tree lays out
-        # below it and the frame wraps the whole thing once it's positioned.
+        # Leave room at the top for the DNS frame's title bar; the diagram lays
+        # out below it and the frame wraps the whole thing once it's positioned.
         start_y = MARGIN
         if dns_node is not None:
             start_y = MARGIN + dns_node.top_reserve()
-        self._layout_tree(roots, children, start_y)
+
+        boxes = [
+            layout.Box(n.key, n.boundingRect().width(), n.boundingRect().height())
+            for n in if_nodes.values()
+        ]
+        boxes += [
+            layout.Box(g.key, g.block_width(), g.block_height()) for g in ip_groups
+        ]
+        placement = layout.solve(
+            boxes, graph_edges, sources, priority,
+            margin_x=MARGIN, margin_y=start_y, col_gap=COL_GAP, row_gap=V_GAP,
+        )
+        # The saver is muted for the whole placement pass (see _laying_out), so
+        # these setPos() calls don't masquerade as user-chosen positions.
+        self._laying_out = True
+        for key, (x, y) in placement.items():
+            node = node_by_key[key]
+            if isinstance(node, RegionNode):
+                node.arrange(x, y)  # places its member boxes + frame
+            else:
+                node.setPos(x, y)
 
         for draft, node in zip(self._drafts, draft_nodes, strict=True):
             node.setPos(draft["pos"])
@@ -216,11 +239,13 @@ class Canvas(QGraphicsView):
             node.moved.connect(self._make_draft_position_saver(dv, node))
 
         # Remembered positions win over the automatic layout; members moving
-        # makes their group reflow around them.
+        # makes their group reflow around them. _positions is intact here
+        # because the saver was muted through the auto pass above.
         remembered = [*if_nodes.values(), *ip_nodes]
         for node in remembered:
             if node.key in self._positions:
                 node.setPos(self._positions[node.key])
+        self._laying_out = False
 
         # Member moves no longer auto-grow their frame (so an address can be
         # dragged out), so wrap each group once here, after every member has its
@@ -239,29 +264,6 @@ class Canvas(QGraphicsView):
 
         rect = scene.itemsBoundingRect().adjusted(-MARGIN, -MARGIN, MARGIN, MARGIN)
         scene.setSceneRect(rect)
-
-    def _layout_tree(self, roots, children, start_y: float = MARGIN) -> None:
-        y = start_y
-
-        def place(node, depth: int, top: float) -> float:
-            """Position node and its subtree; return the subtree height."""
-            x = MARGIN + depth * COL_W
-            # An IP group is a leaf that arranges its own member boxes.
-            if isinstance(node, RegionNode):
-                return node.arrange(x, top)
-            kids = children.get(node.iface.name, [])
-            if not kids:
-                node.setPos(x, top)
-                return node.boundingRect().height()
-            cursor = top
-            for kid in kids:
-                cursor += place(kid, depth + 1, cursor) + V_GAP
-            block = cursor - V_GAP - top
-            node.setPos(x, top + max(0.0, (block - node.boundingRect().height()) / 2))
-            return max(block, node.boundingRect().height())
-
-        for root in roots:
-            y += place(root, 0, y) + V_GAP
 
     def auto_layout(self) -> None:
         self._positions.clear()
@@ -441,7 +443,13 @@ class Canvas(QGraphicsView):
         return lambda: self._node_dropped(node)
 
     def _make_position_saver(self, node: BaseNode):
-        return lambda: self._positions.__setitem__(node.key, node.pos())
+        # Record a position only when the *user* moves a box, not when the
+        # auto-layout does (see self._laying_out) — otherwise every re-probe's
+        # tidy pass would freeze auto guesses in as if the user had chosen them.
+        def save() -> None:
+            if not self._laying_out:
+                self._positions[node.key] = node.pos()
+        return save
 
     def _make_draft_position_saver(self, draft: dict, node: BaseNode):
         return lambda: draft.__setitem__("pos", node.pos())
