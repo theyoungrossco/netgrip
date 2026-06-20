@@ -31,6 +31,22 @@ def test_interface_families_and_per_family_helpers():
     assert eth0.dns_for(6) == ["2001:db8::1"]
 
 
+def test_configured_families_keeps_box_for_orphaned_gateway_or_dns():
+    from netgrip.core.model import Address
+    # An address makes a family configured (same as families()).
+    eth0 = Interface(name="eth0", addresses=[Address("10.0.0.5", 24, 4)])
+    assert eth0.configured_families() == [4]
+    # Drop the address but keep a static gateway / DNS: the family still has
+    # config to show, so its box must not vanish (it would orphan the gateway).
+    eth0.addresses = []
+    eth0.gateways = {4: Gateway("10.0.0.1")}
+    eth0.dns = ["9.9.9.9"]
+    assert eth0.configured_families() == [4]
+    assert eth0.families() == []  # ...but it has no *address* family anymore
+    # Truly empty: no box.
+    assert Interface(name="bare").configured_families() == []
+
+
 def test_apply_link_dns_attaches_and_marks_dynamic():
     from netgrip.core.model import Address
     eth0 = Interface(

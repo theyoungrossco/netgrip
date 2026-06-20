@@ -1,6 +1,7 @@
 """Detection of the host's persistent network-config owner (backends.py)."""
 
 from netgrip.core.backends import (
+    IFUPDOWN,
     NETPLAN,
     NETWORKD,
     NETWORKMANAGER,
@@ -13,12 +14,13 @@ from netgrip.core.backends import (
 from netgrip.core.runner import CommandError, Runner
 
 
-def _output(nm: str = "", networkd: str = "", netplan: str = "") -> str:
-    """Build a detection-script transcript with the three marker sections."""
+def _output(nm: str = "", networkd: str = "", netplan: str = "", ifupdown: str = "") -> str:
+    """Build a detection-script transcript with the marker sections."""
     return (
         f"@@NM@@\n{nm}\n"
         f"@@NETWORKD@@\n{networkd}\n"
         f"@@NETPLAN@@\n{netplan}\n"
+        f"@@IFUPDOWN@@\n{ifupdown}\n"
     )
 
 
@@ -57,6 +59,33 @@ def test_networkd_only():
     backend = parse_backend(_output(nm="inactive", networkd="active"))
     assert backend.kind == NETWORKD
     assert backend.persists is True
+
+
+def test_ifupdown_when_interfaces_file_and_ifreload():
+    # Debian/Proxmox: /etc/network/interfaces present, ifupdown2's ifreload there.
+    backend = parse_backend(_output(ifupdown="hasfile\nifreload"))
+    assert backend.kind == IFUPDOWN
+    assert backend.persists is True
+    assert "/etc/network/interfaces" in backend.summary
+
+
+def test_ifupdown_from_active_networking_service():
+    backend = parse_backend(_output(ifupdown="active\nifreload"))
+    assert backend.kind == IFUPDOWN
+
+
+def test_ifupdown_needs_reload_tool():
+    # An interfaces file but no ifreload (classic ifupdown) isn't claimed — the
+    # Save write-through drives ifupdown2's ifreload, so we'd have no way to apply.
+    backend = parse_backend(_output(ifupdown="hasfile"))
+    assert backend.kind == RUNTIME
+
+
+def test_active_manager_beats_ifupdown():
+    # A host running systemd-networkd that also has a stale interfaces file:
+    # the active manager wins, not ifupdown.
+    backend = parse_backend(_output(networkd="active", ifupdown="hasfile\nifreload"))
+    assert backend.kind == NETWORKD
 
 
 def test_runtime_only_when_nothing_manages():

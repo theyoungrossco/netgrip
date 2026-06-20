@@ -8,6 +8,7 @@ to :meth:`Runner.run_privileged`, which executes it as one batch.
 from __future__ import annotations
 
 import ipaddress
+import os
 import re
 import shlex
 
@@ -36,6 +37,17 @@ BOND_MODES = {
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,15}$")  # IFNAMSIZ is 16 incl. NUL
 _MAC_RE = re.compile(r"^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$")
+
+# Heredoc terminator for plan_write_file. Quoted (<<'…') so the shell expands
+# nothing in the body — every byte of a generated config file lands verbatim.
+WRITE_HEREDOC = "NETGRIP_EOF"
+# Recovers (path, body) from a plan_write_file step so the confirm dialog can
+# render it as a file instead of a quoted heredoc blob (see write_file_preview).
+_WRITE_RE = re.compile(
+    r"cat > (?P<path>\S+) <<'" + WRITE_HEREDOC + r"'\n(?P<body>.*)\n"
+    + WRITE_HEREDOC + r"\s*$",
+    re.DOTALL,
+)
 
 
 def valid_link_name(name: str) -> bool:
@@ -274,3 +286,64 @@ def plan_move_vlan(vlan: Interface, new_parent: str) -> list[list[str]]:
     if vlan.is_up:
         plan += plan_set_link(name, True)
     return plan
+
+
+def plan_write_file(path: str, content: str) -> list[list[str]]:
+    """Write ``content`` to ``path`` as one privileged ``sh -c`` step.
+
+    The persistence backends (networkd / netplan) need to lay down a config
+    file; this is the one primitive that does it. The body is fed through a
+    *quoted* heredoc (``<<'NETGRIP_EOF'``) so the shell performs no expansion —
+    ``$``, backticks and backslashes in the file all land verbatim. The
+    directory is created first, so a first Save on a host that has no
+    ``/etc/systemd/network`` yet still works. (A body containing a lone
+    ``NETGRIP_EOF`` line would close the heredoc early, but generated config
+    never does.)"""
+    directory = os.path.dirname(path)
+    body = content if content.endswith("\n") else content + "\n"
+    prefix = f"mkdir -p {shlex.quote(directory)} && " if directory else ""
+    script = (
+        f"{prefix}cat > {shlex.quote(path)} <<'{WRITE_HEREDOC}'\n"
+        f"{body}{WRITE_HEREDOC}\n"
+    )
+    return [["sh", "-c", script]]
+
+
+def write_file_preview(argv: list[str]) -> tuple[str, str] | None:
+    """If ``argv`` is a :func:`plan_write_file` step, return ``(path, body)``.
+
+    Lets the confirmation dialog show a file write as its destination and
+    contents rather than an opaque heredoc one-liner. Returns ``None`` for any
+    other command, so callers can fall back to the normal ``shlex.join``."""
+    if len(argv) != 3 or argv[:2] != ["sh", "-c"]:
+        return None
+    match = _WRITE_RE.search(argv[2])
+    if not match:
+        return None
+    try:
+        path = shlex.split(match.group("path"))[0]
+    except (ValueError, IndexError):
+        path = match.group("path")
+    return path, match.group("body")
+
+
+def affected_links(plan: list[list[str]]) -> set[str]:
+    """Interface names a plan operates on, for tracking which links carry
+    unsaved runtime changes.
+
+    Purely lexical (it never runs anything): it collects the token after a
+    ``dev`` or ``name`` keyword and the ``<NAME>`` of an ``ip link add <NAME>``
+    that creates a device positionally. An unrecognised verb simply contributes
+    nothing — good enough to mark dirty links without threading a name through
+    every call site."""
+    links: set[str] = set()
+    for argv in plan:
+        for i, token in enumerate(argv):
+            if token in ("dev", "name") and i + 1 < len(argv):
+                links.add(argv[i + 1])
+        # `ip link add <NAME> type …` names a new device positionally; `ip link
+        # add link <PARENT> name <NAME> …` (a VLAN) instead uses the `name`
+        # keyword caught above, so skip the positional form there.
+        if argv[:3] == ["ip", "link", "add"] and len(argv) > 3 and argv[3] != "link":
+            links.add(argv[3])
+    return links

@@ -8,7 +8,7 @@ import ipaddress
 import secrets
 from functools import partial
 
-from PySide6.QtCore import QPoint, QPointF, QSettings, Qt
+from PySide6.QtCore import QPoint, QPointF, QSettings, Qt, QTimer
 from PySide6.QtGui import QAction, QIcon, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
@@ -19,11 +19,12 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
+    QPushButton,
     QToolBar,
 )
 
 import netgrip
-from netgrip.core import actions
+from netgrip.core import actions, persist
 from netgrip.core.backends import Backend, detect_backend
 from netgrip.core.demo import DEMO_BACKEND, DEMO_DNS, DEMO_DNS_SEARCH, demo_interfaces
 from netgrip.core.model import (
@@ -87,6 +88,21 @@ _CUSTOM = "__custom__"
 TRY_SECONDS = 60
 TRY_GRACE = 10
 
+# A change can finish landing a beat after the command returns: an Apply that
+# brings a link up then waits on a DHCP/RA lease, or a Save whose backend
+# re-activates the link (nmcli con up / netplan apply) while IPv6 re-acquires via
+# RA. A single probe can catch that mid-flight and then sit on the wrong state
+# until a manual refresh, so every apply schedules a follow-up re-probe (Save,
+# which bounces the link harder, gets a second, later one). See _reprobe_settling.
+APPLY_SETTLE_MS = 1500
+SAVE_SETTLE_MS = 1500
+
+# A gentle background re-probe keeps the canvas tracking reality — a change still
+# settling, or one made outside NetGrip — so the user never has to refresh by
+# hand. It skips itself whenever it could interrupt (mid-gesture, a dialog/menu
+# open, or a probe/apply already running), so it "doesn't break anything".
+AUTO_REFRESH_MS = 10000
+
 
 class MainWindow(QMainWindow):
     def __init__(self, initial_host: str | None = None, demo: bool = False):
@@ -100,6 +116,14 @@ class MainWindow(QMainWindow):
         self.runner: Runner = UnconnectedRunner() if IS_WINDOWS else LocalRunner()
         self.state: HostState | None = None
         self._busy = False
+        # Links with runtime changes (Apply / Try-kept) not yet persisted via
+        # Save. Names only; the config to write is re-derived from self.state at
+        # Save time so it reflects current reality. Cleared on host switch.
+        self._unsaved: set[str] = set()
+        # (interface, family) the user has switched to Dynamic/DHCP but not saved
+        # (M5). The static address stays at runtime until Save writes `dhcp`
+        # through the backend; this drives the pending marker and the Save plan.
+        self._dhcp_pending: set[tuple[str, int]] = set()
 
         self.canvas = Canvas(self)
         self.setCentralWidget(self.canvas)
@@ -111,6 +135,25 @@ class MainWindow(QMainWindow):
         self.canvas.node_menu_requested.connect(self._show_node_menu)
         self.canvas.region_menu_requested.connect(self._show_region_menu)
         self.canvas.canvas_menu_requested.connect(self._show_canvas_menu)
+
+        # Floating Save affordance, pinned to the canvas's top-right corner. It
+        # is hidden until there are unsaved changes the backend can persist, then
+        # appears in the attention colour — Save is a real, reboot-affecting
+        # commit, so it should be unmissable rather than a quiet toolbar entry.
+        self.save_button = QPushButton(self.canvas)
+        self.save_button.setStyleSheet(theme.save_button_style())
+        self.save_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.save_button.setShortcut(QKeySequence.StandardKey.Save)
+        self.save_button.clicked.connect(self._save)
+        self.save_button.hide()
+        self.canvas.set_corner_widget(self.save_button)
+
+        # Background re-probe so the canvas stays current on its own (see
+        # AUTO_REFRESH_MS). Self-guards against interrupting the user.
+        self._auto_timer = QTimer(self)
+        self._auto_timer.setInterval(AUTO_REFRESH_MS)
+        self._auto_timer.timeout.connect(self._auto_reprobe)
+        self._auto_timer.start()
 
         self._build_toolbar()
         # Persistent persistence indicator on the right of the status bar: which
@@ -197,6 +240,7 @@ class MainWindow(QMainWindow):
         mode = self.theme_combo.itemData(index)
         QSettings().setValue("theme", mode)
         theme.apply_theme(QApplication.instance(), mode)
+        self.save_button.setStyleSheet(theme.save_button_style())  # follow the scheme
         # Repaint the canvas (node colours) under the new scheme.
         self.canvas.populate(self.state, self.loopback_action.isChecked())
 
@@ -241,6 +285,10 @@ class MainWindow(QMainWindow):
     def _connect_to(self, runner: Runner) -> None:
         self.runner.close()
         self.runner = runner
+        # Unsaved changes belong to the host we are leaving; the new host starts
+        # clean (its own runtime state is whatever the probe reports).
+        self._unsaved.clear()
+        self._dhcp_pending.clear()
         self.refresh()
 
     def refresh(self) -> None:
@@ -350,8 +398,18 @@ class MainWindow(QMainWindow):
             list(dns or []), list(dns_search or []), can_edit_dns,
             backend=backend,
         )
+        # Re-attach any unsaved "→ DHCP" intents, dropping ones whose link or
+        # static address is gone (already DHCP, or removed), so a stale pending
+        # marker never lingers after the switch actually lands.
+        self._dhcp_pending = {
+            (name, fam) for (name, fam) in self._dhcp_pending
+            if (iface := self.state.get(name)) is not None
+            and any(not a.dynamic and a.scope == "global" for a in iface.addresses_for(fam))
+        }
+        self.state.dhcp_pending = set(self._dhcp_pending)
         self.canvas.populate(self.state, self.loopback_action.isChecked())
         self._update_backend_indicator(backend)
+        self._update_save_button()  # backend (and so write-ability) may have changed
         dns_note = f" · DNS {', '.join(self.state.dns)}" if self.state.dns else ""
         self.statusBar().showMessage(
             f"{self.runner.label}: {len(interfaces)} interfaces{dns_note}"
@@ -389,12 +447,16 @@ class MainWindow(QMainWindow):
     # applying plans
     # ------------------------------------------------------------------ #
     def _apply(self, title: str, plan: list[list[str]], on_success=None,
-               *, revert: list[list[str]] | None = None) -> None:
+               *, revert: list[list[str]] | None = None, settle_ms: int = 0) -> None:
         """Confirm and run a plan. When a ``revert`` (inverse) plan is supplied
         the confirmation offers *Try* — apply now and auto-revert shortly unless
         kept — alongside *Apply*. Try is for the connection-risky gestures where
         a wrong value could lock you out; its provisional change does not run
-        ``on_success`` (that side effect belongs to a committed change)."""
+        ``on_success`` (that side effect belongs to a committed change).
+
+        ``settle_ms`` delays the post-run re-probe (used by Save, whose backend
+        reconfigure briefly disrupts links/DNS) so the canvas redraws the settled
+        state once instead of flashing the transient."""
         if self._busy or not plan:
             return
         choice = confirm_commands(
@@ -414,9 +476,10 @@ class MainWindow(QMainWindow):
         def done(_result) -> None:
             self._set_busy(False)
             self.statusBar().showMessage(f"{title}: done")
+            self._mark_unsaved(plan)
             if on_success:
                 on_success()
-            self.refresh()
+            self._reprobe_settling(settle_ms)
 
         run_in_background(
             lambda: runner.run_privileged(plan),
@@ -465,6 +528,35 @@ class MainWindow(QMainWindow):
         else:
             self._show_error(message)
 
+    def _reprobe_settling(self, settle_ms: int) -> None:
+        """Re-probe so the canvas converges on the *settled* state by itself.
+
+        A change can finish landing a beat after its command returns — an Apply
+        that brings a link up then waits on a DHCP/RA lease, or a Save whose
+        backend re-activates the link while IPv6 re-acquires via RA — so a single
+        probe can catch it mid-flight. An Apply shows the result now and re-probes
+        once shortly after; a Save (which bounces the link harder) probes after
+        the settle and again well after. The background poll is the final net."""
+        if settle_ms:
+            QTimer.singleShot(settle_ms, self.refresh)
+            QTimer.singleShot(settle_ms + 4500, self.refresh)
+        else:
+            self.refresh()
+            QTimer.singleShot(APPLY_SETTLE_MS, self.refresh)
+
+    def _auto_reprobe(self) -> None:
+        """Background-timer tick: re-probe the host, but only when it can't
+        interrupt anything. Skipped while a probe/apply is running, while the
+        user is mid-gesture (a mouse button is down — repopulating would delete
+        the dragged box), and while any dialog or context menu is open."""
+        if self._busy or isinstance(self.runner, (UnconnectedRunner, DemoRunner)):
+            return
+        if QApplication.activeModalWidget() or QApplication.activePopupWidget():
+            return
+        if QApplication.mouseButtons() != Qt.MouseButton.NoButton:
+            return
+        self.refresh()
+
     def _try(self, title: str, plan: list[list[str]], revert: list[list[str]],
              on_keep=None) -> None:
         """Apply ``plan`` with an armed host-side auto-revert, then open the
@@ -479,7 +571,7 @@ class MainWindow(QMainWindow):
         def armed(_result) -> None:
             self._set_busy(False)
             self.refresh()  # show the just-applied change before the user decides
-            self._start_try_countdown(title, token, revert, on_keep)
+            self._start_try_countdown(title, token, plan, revert, on_keep)
 
         run_in_background(
             lambda: runner.run_privileged(arm),
@@ -487,7 +579,7 @@ class MainWindow(QMainWindow):
             on_error=self._on_privileged_error,
         )
 
-    def _start_try_countdown(self, title: str, token: str,
+    def _start_try_countdown(self, title: str, token: str, plan: list[list[str]],
                              revert: list[list[str]], on_keep=None) -> None:
         dlg = TryCountdownDialog(self, title, TRY_SECONDS)
         dlg.exec()
@@ -504,8 +596,12 @@ class MainWindow(QMainWindow):
         def done(_r) -> None:
             self._set_busy(False)
             self.statusBar().showMessage(f"{title}: {verb}")
-            if dlg.kept and on_keep:
-                on_keep()
+            if dlg.kept:
+                # A kept change is a real runtime edit now — same as Apply, it
+                # becomes unsaved until persisted. A revert leaves nothing dirty.
+                self._mark_unsaved(plan)
+                if on_keep:
+                    on_keep()
             self.refresh()
 
         run_in_background(
@@ -513,6 +609,122 @@ class MainWindow(QMainWindow):
             on_done=done,
             on_error=self._on_privileged_error,
         )
+
+    # ------------------------------------------------------------------ #
+    # Save: persist unsaved runtime changes through the backend
+    # ------------------------------------------------------------------ #
+    def _mark_unsaved(self, plan: list[list[str]]) -> None:
+        """Record the links a just-applied plan touched as unsaved. ``lo`` is
+        excluded — loopback isn't something Save persists."""
+        self._unsaved |= actions.affected_links(plan) - {"lo"}
+        self._update_save_button()
+
+    def _set_dhcp_intent(self, name: str, family: int) -> None:
+        """Record a pending switch of (name, family) to DHCP (M5). No runtime
+        change: the static stays until Save writes `dhcp` and the backend reload
+        performs the swap. Marks the link unsaved and redraws the box's marker."""
+        self._dhcp_pending.add((name, family))
+        self._unsaved.add(name)
+        self._update_save_button()
+        if self.state:
+            self.state.dhcp_pending = set(self._dhcp_pending)
+            self.canvas.populate(self.state, self.loopback_action.isChecked())
+        self.statusBar().showMessage(f"{name} IPv{family} will switch to DHCP when you Save.")
+
+    def _update_save_button(self) -> None:
+        """Show the floating Save button only when there is something to persist
+        *and* the backend can write it; otherwise hide it entirely."""
+        count = len(self._unsaved)
+        backend = self.state.backend if self.state else None
+        can_write = bool(backend and backend.persists)
+        if count and can_write:
+            plural = "s" if count != 1 else ""
+            self.save_button.setText(f"Save {count} change{plural}")
+            self.save_button.setToolTip(
+                f"Persist {count} changed link{plural} through {backend.label} "
+                "— survives reboot"
+            )
+            self.save_button.adjustSize()
+            self.canvas.position_corner_widget()
+            self.save_button.show()
+            self.save_button.raise_()
+        else:
+            self.save_button.hide()
+
+    def _save(self) -> None:
+        """Persist every unsaved link's current IP config through the backend.
+
+        Save writes the *running* config of the touched links (declarative), not
+        a replay of the deltas — so it captures wherever Apply/Try-keep left
+        them. It reuses the standard confirm → escalate → run → re-probe path
+        (Apply-only; persisting is itself the commit, so no Try)."""
+        if self._busy or not self.state or not self._unsaved:
+            return
+        backend = self.state.backend
+        if backend is None or not backend.persists:
+            return
+        links = sorted(self._unsaved)
+        configs = []
+        for name in links:
+            iface = self.state.get(name)
+            if iface is None:
+                continue
+            cfg = persist.link_config(iface)
+            # Apply any pending "→ DHCP" switch for this link's families (M5):
+            # the running state still holds the static, so override it here.
+            for fam in (4, 6):
+                if (name, fam) in self._dhcp_pending:
+                    cfg.set_dhcp(fam)
+            configs.append(cfg)
+        if not configs:
+            self._unsaved.clear()  # the links are gone (deleted); nothing to save
+            self._update_save_button()
+            return
+        saved = set(links)
+        title = f"Save {len(configs)} link(s) to {backend.label}"
+        # NetworkManager needs each device's connection profile resolved first;
+        # read that off-thread, then build and confirm the plan.
+        if backend.kind == persist.NETWORKMANAGER:
+            self._save_via_nm(title, configs, saved, backend)
+            return
+        try:
+            plan = persist.persist_plan(configs, backend)
+        except persist.PersistError as exc:
+            self._show_error(str(exc))
+            return
+        self._apply(title, plan, on_success=lambda: self._clear_saved(saved),
+                    settle_ms=SAVE_SETTLE_MS)
+
+    def _save_via_nm(self, title: str, configs: list[persist.LinkConfig],
+                     saved: set[str], backend: Backend) -> None:
+        runner = self.runner
+        self._set_busy(True, "Reading NetworkManager connections…")
+
+        def done(connections: dict[str, str]) -> None:
+            self._set_busy(False)
+            try:
+                plan = persist.persist_plan(configs, backend, connections)
+            except persist.PersistError as exc:
+                self._show_error(str(exc))
+                return
+            if not plan:  # nothing nmcli can express for these links
+                self._clear_saved(saved)
+                return
+            self._apply(title, plan, on_success=lambda: self._clear_saved(saved),
+                        settle_ms=SAVE_SETTLE_MS)
+
+        run_in_background(
+            lambda: persist.read_nm_connections(runner),
+            on_done=done,
+            on_error=lambda msg: (self._set_busy(False), self._show_error(msg)),
+        )
+
+    def _clear_saved(self, links: set[str]) -> None:
+        self._unsaved -= links
+        # A saved link's pending DHCP switch is now persisted; drop the intent
+        # (the post-Save re-probe will show the lease in place of the static).
+        self._dhcp_pending = {(n, f) for (n, f) in self._dhcp_pending if n not in links}
+        self._update_save_button()
 
     # ------------------------------------------------------------------ #
     # drag-and-drop gestures
@@ -1096,6 +1308,16 @@ class MainWindow(QMainWindow):
         dlg = IpGroupDialog(self, iface, family, can_edit_dns=self.state.can_edit_dns)
         if not dlg.exec():
             return
+        # M5: choosing Dynamic for a family that is currently static is a pending
+        # switch to DHCP — recorded and applied at Save (the backend reload does
+        # the static→DHCP swap), not a runtime ip command. Choosing Static again
+        # cancels a pending switch.
+        has_static = any(not a.dynamic and a.scope == "global"
+                         for a in iface.addresses_for(family))
+        if not dlg.address_static and has_static:
+            self._set_dhcp_intent(iface.name, family)
+            return
+        self._dhcp_pending.discard((iface.name, family))
         plan, revert, changed = self._ipgroup_plan(
             iface, family,
             address=dlg.new_static_address, address_static=dlg.address_static,
@@ -1111,10 +1333,10 @@ class MainWindow(QMainWindow):
         ):
             # Static chosen, but the address is the one DHCP/RA already handed
             # out: there is nothing safe to change at runtime (deleting it would
-            # drop the link). Making it persistently static is a Save (4a).
+            # drop the link). Pinning it as static persistently is a Save.
             self.statusBar().showMessage(
                 f"{dlg.new_static_address} is already assigned via DHCP/RA — "
-                "pinning it as static will need Save (coming in 0.2)."
+                "pin it as static with Save."
             )
 
     def _manual_dns_dialog(self) -> None:

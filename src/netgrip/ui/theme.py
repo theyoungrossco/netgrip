@@ -138,6 +138,29 @@ def region(family: int) -> tuple[QColor, QColor]:
     return QColor(fill), QColor(border)
 
 
+def save_button_style() -> str:
+    """Stylesheet for the floating *Save* affordance on the canvas.
+
+    Deliberately loud — it appears only when changes are pending and persisting
+    them is a real, reboot-affecting commit, so it reads as an attention button
+    (the warning/error red) rather than a quiet toolbar entry. Palette-aware so
+    it stays legible in light and dark, keeping every colour decision here per
+    the project's theme rule."""
+    base = QColor(_table()["error"])
+    return f"""
+        QPushButton {{
+            background-color: {base.name()};
+            color: #ffffff;
+            border: none;
+            border-radius: 6px;
+            padding: 9px 18px;
+            font-weight: 600;
+        }}
+        QPushButton:hover {{ background-color: {base.lighter(112).name()}; }}
+        QPushButton:pressed {{ background-color: {base.darker(115).name()}; }}
+    """
+
+
 # -- application of the scheme --------------------------------------------
 def apply_theme(app: QApplication, mode: str = "system") -> str:
     """Resolve ``mode`` (system|light|dark), set the app palette, return scheme.

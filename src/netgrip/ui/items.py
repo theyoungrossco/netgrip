@@ -536,9 +536,15 @@ class IpGroup(RegionNode):
     gateway, DNS and search that family's lease hands out. The drop target for
     attaching another address to this interface."""
 
-    def __init__(self, iface: Interface, family: int, members: list[BaseNode]):
+    def __init__(self, iface: Interface, family: int, members: list[BaseNode],
+                 pending_dhcp: bool = False):
         fill, border = theme.region(family)
-        super().__init__(f"IPv{family}", ipgroup_detail(iface, family), fill, border, members)
+        detail = ipgroup_detail(iface, family)
+        if pending_dhcp:
+            # The family still holds its static address at runtime; this flags
+            # the unsaved switch to DHCP that Save will write (M5).
+            detail = [*detail, "→ DHCP on Save"]
+        super().__init__(f"IPv{family}", detail, fill, border, members)
         self.iface = iface
         self.family = family
         self.key = f"ipgroup:{iface.name}:{family}"

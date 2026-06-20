@@ -71,6 +71,33 @@ class Canvas(QGraphicsView):
         self._draft_vlans: list[dict] = []  # {id, vlan_id, name, cidrs, pos}
         self._aliases: dict[str, str] = {}  # _alias_key() -> user box name
         self._manual_dns: list[str] = []  # user-added host-wide resolvers
+        # An optional widget pinned to the top-right corner of the viewport (the
+        # floating Save button), floating above the scene and unaffected by
+        # scroll/zoom. Repositioned on resize; see set_corner_widget().
+        self._corner_widget = None
+
+    # ------------------------------------------------------------------ #
+    # corner overlay (a viewport-pinned widget, e.g. the Save button)
+    # ------------------------------------------------------------------ #
+    def set_corner_widget(self, widget) -> None:
+        """Pin ``widget`` to the viewport's top-right corner. It is reparented
+        onto the viewport so it floats over the diagram and ignores pan/zoom."""
+        self._corner_widget = widget
+        widget.setParent(self.viewport())
+        self.position_corner_widget()
+
+    def position_corner_widget(self) -> None:
+        """Pin the corner widget to the viewport's top-right. Called on resize
+        and whenever the widget changes size (e.g. the Save count grows)."""
+        widget = self._corner_widget
+        if widget is None:
+            return
+        margin = 16
+        widget.move(self.viewport().width() - widget.width() - margin, margin)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self.position_corner_widget()
 
     # ------------------------------------------------------------------ #
     # population & layout
@@ -111,8 +138,14 @@ class Canvas(QGraphicsView):
         ip_nodes: list[IpNode] = []  # every member box (for save & positions)
         ip_groups: list[IpGroup] = []
         groups_by_iface: dict[str, list[IpGroup]] = {name: [] for name in if_nodes}
+        pending_dhcp = getattr(state, "dhcp_pending", set())
         for iface in shown:
-            for family in iface.families():
+            # A family pending a switch to DHCP keeps its box even if its last
+            # static address has gone, so the user can see (and Save) the switch.
+            families = list(iface.configured_families())
+            families += [f for f in (4, 6)
+                         if (iface.name, f) in pending_dhcp and f not in families]
+            for family in sorted(families):
                 members = [
                     IpNode.from_address(
                         addr, iface.name,
@@ -121,7 +154,8 @@ class Canvas(QGraphicsView):
                     for addr in iface.addresses_for(family)
                     if not addr.dynamic  # DHCP/RA address shows in the group header
                 ]
-                group = IpGroup(iface, family, members)
+                group = IpGroup(iface, family, members,
+                                pending_dhcp=(iface.name, family) in pending_dhcp)
                 ip_nodes.extend(members)
                 ip_groups.append(group)
                 groups_by_iface[iface.name].append(group)

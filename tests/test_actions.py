@@ -208,3 +208,48 @@ def test_set_dns_plan_with_and_without_search():
         ["resolvectl", "dns", "eth0", "1.1.1.1"],
         ["resolvectl", "domain", "eth0", "lan.example"],
     ]
+
+
+def test_write_file_makes_dir_and_uses_unexpanded_heredoc():
+    plan = actions.plan_write_file("/etc/systemd/network/10-netgrip-eth0.network",
+                                   "[Match]\nName=eth0\n")
+    assert len(plan) == 1 and plan[0][:2] == ["sh", "-c"]
+    script = plan[0][2]
+    # The directory is created first, the file written via a *quoted* heredoc
+    # (so the shell expands nothing in the body).
+    assert "mkdir -p /etc/systemd/network &&" in script
+    assert "cat > /etc/systemd/network/10-netgrip-eth0.network <<'NETGRIP_EOF'" in script
+    assert "[Match]\nName=eth0\n" in script
+    assert script.rstrip().endswith("NETGRIP_EOF")
+
+
+def test_write_file_body_not_shell_expanded():
+    # A '$' or backtick in the content must survive verbatim, not be expanded.
+    plan = actions.plan_write_file("/etc/netplan/90-netgrip.yaml", "x: $HOME `id`\n")
+    assert "x: $HOME `id`" in plan[0][2]
+
+
+def test_write_file_preview_round_trips_path_and_body():
+    body = "[Match]\nName=eth0\n\n[Network]\nAddress=10.0.0.5/24"
+    plan = actions.plan_write_file("/etc/systemd/network/10-netgrip-eth0.network", body)
+    path, recovered = actions.write_file_preview(plan[0])
+    assert path == "/etc/systemd/network/10-netgrip-eth0.network"
+    assert recovered == body  # the trailing newline plan_write_file adds is trimmed
+
+
+def test_write_file_preview_ignores_other_commands():
+    assert actions.write_file_preview(["ip", "addr", "add", "10.0.0.5/24", "dev", "eth0"]) is None
+    assert actions.write_file_preview(["sh", "-c", "echo hi"]) is None
+
+
+def test_affected_links_collects_dev_name_and_positional_add():
+    plan = (
+        actions.plan_add_addresses("eth0", ["10.0.0.5/24"])
+        + actions.plan_set_gateway("eth0", "10.0.0.1", 4)
+        + actions.plan_create_bond("bond0", "active-backup", ["eth1", "eth2"])
+        + actions.plan_create_vlan("eth0", 100)  # `ip link add link … name eth0.100`
+    )
+    links = actions.affected_links(plan)
+    assert links == {"eth0", "eth1", "eth2", "bond0", "eth0.100"}
+    # The gateway address is not mistaken for a link name.
+    assert "10.0.0.1" not in links

@@ -107,6 +107,16 @@ class Interface:
         """Address families present on this link, IPv4 first, deduplicated."""
         return [f for f in (4, 6) if any(a.family == f for a in self.addresses)]
 
+    def configured_families(self) -> list[int]:
+        """Families with *any* config worth a box — an address, a default route,
+        or per-link DNS. Used to decide which IPv4/IPv6 groups to draw, so a
+        family keeps its box (and its gateway/DNS stay visible and editable)
+        after its last address is removed, instead of silently vanishing."""
+        return [
+            f for f in (4, 6)
+            if self.addresses_for(f) or self.gateway_for(f) or self.dns_for(f)
+        ]
+
     def gateway_for(self, family: int) -> Gateway | None:
         return self.gateways.get(family)
 
@@ -126,6 +136,11 @@ class HostState:
     can_edit_dns: bool = False  # systemd-resolved (resolvectl) present for per-link DNS
     manual_dns: list[str] = field(default_factory=list)  # user-added extras (from store)
     backend: Backend | None = None  # which subsystem owns persistent config (see backends.py)
+    # (interface, family) pairs the user has switched to DHCP but not yet saved.
+    # UI-only intent (set by main_window, redrawn each probe): the family still
+    # holds its static address at runtime until Save writes `dhcp` through the
+    # backend, so this is what keeps the box showing the pending switch. See M5.
+    dhcp_pending: set[tuple[str, int]] = field(default_factory=set)
 
     def get(self, name: str) -> Interface | None:
         return next((i for i in self.interfaces if i.name == name), None)

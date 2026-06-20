@@ -33,6 +33,7 @@ from netgrip.core.actions import (
     valid_ipaddr,
     valid_link_name,
     valid_mac,
+    write_file_preview,
 )
 from netgrip.core.model import Interface, ip_family
 from netgrip.ui import theme
@@ -281,20 +282,22 @@ class IpGroupDialog(QDialog):
 
         form = QFormLayout(self)
         # Addressing: Dynamic (DHCP/RA) leaves the lease alone; Static sets a
-        # fixed address. A DHCP/RA lease pre-fills Dynamic (greyed); a draft's
-        # own static address pre-fills Static via ``initial_static``. Actually
-        # starting a DHCP client is the 0.2 backend, so only Static applies a
-        # change today.
+        # fixed address. A DHCP/RA lease pre-fills Dynamic (greyed); otherwise
+        # default to Static with the field editable — for a static address it
+        # pre-fills it (M2), and for a family with no address yet (adding config)
+        # it lets the user just type one. Defaulting an address-less family to
+        # Dynamic was a trap: Dynamic is a runtime no-op (starting a DHCP client
+        # is the 0.2 backend), so OK applied nothing and the add seemed to fail.
         self._addr_field = DynamicStaticField(
             current=dyn_addr.cidr if dyn_addr else prefill_static,
-            is_dynamic=bool(dyn_addr) or not prefill_static,
+            is_dynamic=bool(dyn_addr),
             placeholder="e.g. 192.168.1.20/24" if family == 4 else "e.g. 2001:db8::20/64",
         )
         form.addRow("Addressing:", self._addr_field)
         addr_hint = QLabel(
-            "Static replaces any DHCP/RA address on this family. Until you Save "
-            "it, a running DHCP client may hand the address back; obtaining one "
-            "via DHCP/RA (the Dynamic direction) needs the 0.2 backend."
+            "Static sets a fixed address now and replaces any DHCP/RA one on this "
+            "family. Dynamic switches the family to DHCP — applied when you Save, "
+            "where the backend swaps the static for a lease."
         )
         addr_hint.setStyleSheet("color: #777;")
         addr_hint.setWordWrap(True)
@@ -562,6 +565,23 @@ class BondDialog(QDialog):
         self.accept()
 
 
+def render_plan(commands: list[list[str]]) -> str:
+    """Format a plan for the confirmation view. A file-write step (see
+    :func:`plan_write_file`) is shown as ``# write <path>:`` followed by its
+    indented body, so Save is reviewable as a file rather than an opaque quoted
+    heredoc; every other command renders as its plain ``shlex``-quoted argv."""
+    lines: list[str] = []
+    for argv in commands:
+        preview = write_file_preview(argv)
+        if preview:
+            path, body = preview
+            lines.append(f"# write {path}:")
+            lines.extend(f"    {line}" for line in body.splitlines())
+        else:
+            lines.append(shlex.join(argv))
+    return "\n".join(lines)
+
+
 def confirm_commands(parent, title: str, commands: list[list[str]], host_label: str,
                      *, allow_try: bool = False, try_seconds: int = 60) -> str:
     """Show the exact commands a plan will run and ask how to apply it.
@@ -577,7 +597,7 @@ def confirm_commands(parent, title: str, commands: list[list[str]], host_label: 
     layout = QVBoxLayout(dialog)
     layout.addWidget(QLabel(f"netgrip will run this on <b>{host_label}</b> (as root):"))
 
-    text = QPlainTextEdit("\n".join(shlex.join(argv) for argv in commands))
+    text = QPlainTextEdit(render_plan(commands))
     text.setReadOnly(True)
     mono = QFont("Monospace")
     mono.setStyleHint(QFont.StyleHint.TypeWriter)

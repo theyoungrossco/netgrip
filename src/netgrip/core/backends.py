@@ -9,8 +9,8 @@ reads those signals — best-effort, exactly like the DNS probe — so the UI ca
 tell the user, per host, what is in charge and whether a change will persist.
 
 It is the keystone of the 0.2 "persistence" work: the write-through *Save*
-backends (NetworkManager / systemd-networkd / netplan) all hang off the kind
-detected here. Qt-free, like the rest of ``core``.
+backends (NetworkManager / systemd-networkd / netplan / ifupdown) all hang off
+the kind detected here. Qt-free, like the rest of ``core``.
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ from netgrip.core.runner import Runner
 NETWORKMANAGER = "networkmanager"
 NETWORKD = "networkd"
 NETPLAN = "netplan"
+IFUPDOWN = "ifupdown"
 RUNTIME = "runtime"
 UNKNOWN = "unknown"
 
@@ -30,6 +31,7 @@ KIND_LABELS = {
     NETWORKMANAGER: "NetworkManager",
     NETWORKD: "systemd-networkd",
     NETPLAN: "netplan",
+    IFUPDOWN: "ifupdown",
     RUNTIME: "Runtime only",
     UNKNOWN: "Unknown",
 }
@@ -40,11 +42,18 @@ KIND_LABELS = {
 _NM = "@@NM@@"
 _NETWORKD = "@@NETWORKD@@"
 _NETPLAN = "@@NETPLAN@@"
+_IFUPDOWN = "@@IFUPDOWN@@"
 DETECT_COMMAND = [
     "sh", "-c",
     f"echo {_NM}; systemctl is-active NetworkManager 2>/dev/null; "
     f"echo {_NETWORKD}; systemctl is-active systemd-networkd 2>/dev/null; "
     f"echo {_NETPLAN}; ls -1 /etc/netplan 2>/dev/null; "
+    # ifupdown (Debian/Proxmox /etc/network/interfaces). We only claim it when
+    # the reload tool exists — `ifreload` ships with ifupdown2, which is what
+    # the Save write-through drives; classic ifupdown without it stays runtime.
+    f"echo {_IFUPDOWN}; systemctl is-active networking 2>/dev/null; "
+    "test -f /etc/network/interfaces && echo hasfile; "
+    "command -v ifreload >/dev/null 2>&1 && echo ifreload; "
     "exit 0",
 ]
 
@@ -70,7 +79,7 @@ class Backend:
     @property
     def manages_config(self) -> bool:
         """True when some manager owns the config (i.e. not pure runtime)."""
-        return self.kind in (NETWORKMANAGER, NETWORKD, NETPLAN)
+        return self.kind in (NETWORKMANAGER, NETWORKD, NETPLAN, IFUPDOWN)
 
     @property
     def persists(self) -> bool:
@@ -99,8 +108,9 @@ def parse_backend(text: str) -> Backend:
     owns the live connections even on a netplan-rendered desktop (whose netplan
     file just delegates to NM), so that is where a change must go. Otherwise a
     populated ``/etc/netplan`` means netplan is the source of truth (rendered by
-    systemd-networkd on servers), then a bare active systemd-networkd, and
-    finally — nothing managing the host — runtime only.
+    systemd-networkd on servers), then a bare active systemd-networkd, then
+    ifupdown (Debian/Proxmox ``/etc/network/interfaces``), and finally —
+    nothing managing the host — runtime only.
     """
     sections = _split_sections(text)
     nm_active = _is_active(sections.get(_NM, ""))
@@ -128,6 +138,12 @@ def parse_backend(text: str) -> Backend:
             "systemd-networkd owns this host. Save writes a persistent "
             ".network file under /etc/systemd/network.",
         )
+    if _is_ifupdown(sections.get(_IFUPDOWN, "")):
+        return Backend(
+            IFUPDOWN,
+            "Configured by ifupdown (/etc/network/interfaces). Save writes a "
+            "drop-in under /etc/network/interfaces.d and runs ifreload.",
+        )
     return Backend(
         RUNTIME,
         "No persistent network manager detected — changes live only in the "
@@ -141,7 +157,7 @@ def _split_sections(text: str) -> dict[str, str]:
     current: str | None = None
     for line in text.splitlines():
         stripped = line.strip()
-        if stripped in (_NM, _NETWORKD, _NETPLAN):
+        if stripped in (_NM, _NETWORKD, _NETPLAN, _IFUPDOWN):
             current = stripped
             sections[current] = ""
         elif current is not None:
@@ -160,3 +176,11 @@ def _netplan_files(block: str) -> list[str]:
         name for name in (line.strip() for line in block.splitlines())
         if name.endswith((".yaml", ".yml"))
     ]
+
+
+def _is_ifupdown(block: str) -> bool:
+    """True for an ifupdown(2) host we can write to: an /etc/network/interfaces
+    file present (or the ``networking`` service active) *and* ``ifreload``
+    available, since the Save write-through drives ifupdown2's ifreload."""
+    lines = {line.strip() for line in block.splitlines()}
+    return ("hasfile" in lines or "active" in lines) and "ifreload" in lines
