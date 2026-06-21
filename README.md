@@ -43,12 +43,17 @@ you select the host.
 ## How it works
 
 NetGrip reads network state with `ip -json` and applies changes with plain
-`iproute2` commands. Before anything is changed, it shows you the **exact
+`iproute2` commands. Saving for persistence writes through the host's own
+network backend instead. Before anything is changed, it shows you the **exact
 commands** it is about to run and asks for confirmation — what you approve is
 what executes, locally via `sudo`/`pkexec` or remotely via `ssh`.
 
-> **Important:** NetGrip manipulates the *running* network stack. Changes are
-> real and immediate, but they are **not yet persisted across reboots**.
+Changes land on the *running* network stack first — real and immediate. When
+you're happy with them, **Save** persists them across reboots through whatever
+backend owns your host's configuration (netplan, systemd-networkd,
+NetworkManager or ifupdown); a status-bar indicator shows which one. A **Try**
+applies a change and auto-reverts it after a countdown unless you keep it, so
+you can test before committing.
 
 The canvas stays *flat* — boxes joined by straight lines — but follows your
 desktop's light or dark theme, with a toolbar **Theme** selector (System /
@@ -131,8 +136,10 @@ default gateway (with a Dynamic/Static toggle) and per-link DNS (via
 systemd-resolved); a host-wide System DNS box that reads `/etc/resolv.conf` and
 shows where each resolver comes from; draft IP configs; light/dark theming;
 remembered box positions, names and drafts per host; remote hosts over SSH;
-demo mode. As noted above, all of this applies to the *running* stack only — it
-isn't yet persisted across reboots.
+demo mode. Changes apply to the running stack, then **Save** persists them
+across reboots through the host's network backend (netplan,
+systemd-networkd, NetworkManager or ifupdown), with **Try** to test a change
+before keeping it.
 
 See [ROADMAP.md](ROADMAP.md) for what's planned next and
 [CHANGELOG.md](CHANGELOG.md) for history.

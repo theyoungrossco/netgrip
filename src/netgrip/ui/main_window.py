@@ -267,8 +267,10 @@ class MainWindow(QMainWindow):
             "About NetGrip",
             f"<b>NetGrip {netgrip.__version__}</b><br>"
             "Visual, drag-and-drop network interface manager.<br>"
-            "Changes are applied with iproute2 and affect the running "
-            "system only.<br><br>"
+            "Changes are applied to the running system with iproute2, then "
+            "<b>Save</b> persists them across reboots through your host's "
+            "network backend (netplan, systemd-networkd, NetworkManager or "
+            "ifupdown).<br><br>"
             '<a href="https://github.com/theyoungrossco/netgrip">'
             "github.com/theyoungrossco/netgrip</a>",
         )
