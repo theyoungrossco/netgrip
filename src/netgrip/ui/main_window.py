@@ -124,6 +124,11 @@ class MainWindow(QMainWindow):
         # (M5). The static address stays at runtime until Save writes `dhcp`
         # through the backend; this drives the pending marker and the Save plan.
         self._dhcp_pending: set[tuple[str, int]] = set()
+        # (interface, cidr) static addresses deleted but not yet saved. On a host
+        # whose backend re-asserts its config (NetworkManager et al.) a runtime
+        # `ip addr del` bounces straight back, so a delete there is a deferred
+        # intent (like _dhcp_pending) applied at Save, not a runtime command.
+        self._removed_addresses: set[tuple[str, str]] = set()
 
         self.canvas = Canvas(self)
         self.setCentralWidget(self.canvas)
@@ -289,6 +294,7 @@ class MainWindow(QMainWindow):
         # clean (its own runtime state is whatever the probe reports).
         self._unsaved.clear()
         self._dhcp_pending.clear()
+        self._removed_addresses.clear()
         self.refresh()
 
     def refresh(self) -> None:
@@ -407,6 +413,14 @@ class MainWindow(QMainWindow):
             and any(not a.dynamic and a.scope == "global" for a in iface.addresses_for(fam))
         }
         self.state.dhcp_pending = set(self._dhcp_pending)
+        # Re-attach pending deletes, dropping any whose address is already gone
+        # (the delete landed, or the link vanished) so no stale marker lingers.
+        self._removed_addresses = {
+            (name, cidr) for (name, cidr) in self._removed_addresses
+            if (iface := self.state.get(name)) is not None
+            and any(a.cidr == cidr for a in iface.addresses)
+        }
+        self.state.removed_pending = set(self._removed_addresses)
         self.canvas.populate(self.state, self.loopback_action.isChecked())
         self._update_backend_indicator(backend)
         self._update_save_button()  # backend (and so write-ability) may have changed
@@ -675,6 +689,12 @@ class MainWindow(QMainWindow):
             for fam in (4, 6):
                 if (name, fam) in self._dhcp_pending:
                     cfg.set_dhcp(fam)
+            # Apply pending deletes: the address is still on the link (a managed
+            # backend would revert a runtime del), so drop it from the config the
+            # profile will be rewritten to.
+            for (rn, cidr) in self._removed_addresses:
+                if rn == name:
+                    cfg.remove_address(cidr)
             configs.append(cfg)
         if not configs:
             self._unsaved.clear()  # the links are gone (deleted); nothing to save
@@ -724,6 +744,8 @@ class MainWindow(QMainWindow):
         # A saved link's pending DHCP switch is now persisted; drop the intent
         # (the post-Save re-probe will show the lease in place of the static).
         self._dhcp_pending = {(n, f) for (n, f) in self._dhcp_pending if n not in links}
+        self._removed_addresses = {(n, c) for (n, c) in self._removed_addresses
+                                   if n not in links}
         self._update_save_button()
 
     # ------------------------------------------------------------------ #
@@ -991,12 +1013,7 @@ class MainWindow(QMainWindow):
             f"Detach from {node.parent_name} (keep as draft)",
             partial(self._detach_ip, node),
         )
-        menu.addAction(
-            "Delete address",
-            partial(self._apply,
-                    f"Delete IPv{node.family} config from {node.parent_name}",
-                    actions.plan_remove_addresses(node.parent_name, [node.cidr])),
-        )
+        menu.addAction("Delete address", partial(self._delete_ip, node))
 
     def _attachable_ifaces(self, exclude: str | None = None) -> list[Interface]:
         if not self.state:
@@ -1195,6 +1212,32 @@ class MainWindow(QMainWindow):
 
     def _clone_ip(self, node: IpNode) -> None:
         self.canvas.add_draft(node.family, node.cidr, node.pos() + QPointF(30, 30))
+
+    def _delete_ip(self, node: IpNode) -> None:
+        """Remove one static address. On a host whose backend owns the config
+        (NetworkManager et al.) a runtime ``ip addr del`` is reverted within
+        seconds, so the delete is deferred to Save (a pending intent, like the
+        "→ DHCP" switch); only a runtime-only host deletes immediately."""
+        backend = self.state.backend if self.state else None
+        if backend is not None and backend.manages_config:
+            self._remove_address_intent(node.parent_name, node.cidr, node.family)
+        else:
+            self._apply(
+                f"Delete IPv{node.family} config from {node.parent_name}",
+                actions.plan_remove_addresses(node.parent_name, [node.cidr]),
+            )
+
+    def _remove_address_intent(self, name: str, cidr: str, family: int) -> None:
+        """Record a pending delete of ``cidr`` from ``name`` (managed backends).
+        No runtime change: the address stays, flagged for removal, until Save
+        rewrites the profile without it. Marks the link unsaved and redraws."""
+        self._removed_addresses.add((name, cidr))
+        self._unsaved.add(name)
+        self._update_save_button()
+        if self.state:
+            self.state.removed_pending = set(self._removed_addresses)
+            self.canvas.populate(self.state, self.loopback_action.isChecked())
+        self.statusBar().showMessage(f"{cidr} will be removed from {name} when you Save.")
 
     def _detach_ip(self, node: IpNode) -> None:
         family, cidr, pos = node.family, node.cidr, node.pos()

@@ -64,6 +64,23 @@ class LinkConfig:
         self.addresses = [a for a in self.addresses if _cidr_family(a) != family]
         self.dns = [s for s in self.dns if ip_family(s) != family]
 
+    def remove_address(self, cidr: str) -> None:
+        """Drop one static address from this config (a Save-applied deletion).
+
+        If it was the family's last static and no lease remains, the family falls
+        back to DHCP (``auto``): the profile must not keep the removed static, and
+        ``auto`` is both the cleared state NetworkManager needs (no manual
+        address ⇒ no manual gateway) and a safer default than leaving the link
+        with no addressing at all. A family that still has another static, or a
+        lease, is left as-is bar the dropped address."""
+        family = _cidr_family(cidr)
+        self.addresses = [a for a in self.addresses if a != cidr]
+        if family is None:
+            return
+        leases = self.dhcp4 if family == 4 else self.dhcp6
+        if not self.addresses_for(family) and not leases:
+            self.set_dhcp(family)
+
 
 def link_config(iface: Interface) -> LinkConfig:
     """Distil a running :class:`Interface` into its persistable IP config.
@@ -290,9 +307,10 @@ def parse_nm_connections(text: str) -> dict[str, str]:
 def nmcli_commands(cfg: LinkConfig, connection: str) -> list[list[str]]:
     """Build the ``nmcli con mod`` (+ ``con up``) plan for one link's config.
 
-    Sets each configured family's method (manual with static addresses, else
-    auto for a lease) and then **always** its addresses/gateway/DNS — clearing
-    them when empty. Clearing matters: NetworkManager keeps applying a profile's
+    Sets each configured family's method (auto when it takes a lease — any static
+    addresses then ride on top of it — else manual) and then **always** its
+    addresses/gateway/DNS — clearing them when empty. Clearing matters:
+    NetworkManager keeps applying a profile's
     ``ipv4.addresses`` even under ``method auto``, so switching to DHCP without
     blanking them leaves the old static address stuck on the link (it reappears
     on the next ``con up``). A family with neither static nor DHCP config is
@@ -311,18 +329,21 @@ def nmcli_commands(cfg: LinkConfig, connection: str) -> list[list[str]]:
 def _nmcli_family(cfg: LinkConfig, family: int, key: str, dhcp: bool,
                   gateway: str) -> list[str]:
     addresses = cfg.addresses_for(family)
-    if addresses:
-        method = "manual"
-    elif dhcp:
-        method = "auto"
-    else:
+    if not addresses and not dhcp:
         return []  # this family isn't configured here — leave the profile alone
-    # Set every property explicitly so the profile *matches* the desired config:
-    # an empty value clears a stale static address/gateway/DNS (the bug above).
+    # DHCP and a static address coexist on a link: under "auto", NetworkManager
+    # adds ipv4.addresses *on top of* the lease. So method follows the lease flag,
+    # not the presence of addresses — a static no longer forces a lease-killing
+    # "manual". (Set every property explicitly so the profile matches the desired
+    # config; an empty value clears a stale static address/gateway/DNS.)
+    method = "auto" if dhcp else "manual"
+    # A manual gateway is only valid alongside a manual address — NM errors
+    # "gateway cannot be set if there are no addresses configured" — and under
+    # pure DHCP the lease provides it, so clear it when there is no static.
     return [
         f"{key}.method", method,
         f"{key}.addresses", ",".join(addresses),
-        f"{key}.gateway", gateway,
+        f"{key}.gateway", gateway if addresses else "",
         f"{key}.dns", ",".join(cfg.dns_for(family)),
     ]
 

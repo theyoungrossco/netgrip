@@ -141,6 +141,11 @@ class HostState:
     # holds its static address at runtime until Save writes `dhcp` through the
     # backend, so this is what keeps the box showing the pending switch. See M5.
     dhcp_pending: set[tuple[str, int]] = field(default_factory=set)
+    # (interface, cidr) static addresses the user has deleted but not yet saved.
+    # Like dhcp_pending, a UI-only intent: on a host whose backend re-asserts its
+    # config (NetworkManager et al.) a runtime `ip addr del` just bounces back, so
+    # the delete is deferred to Save and the box stays, flagged for removal.
+    removed_pending: set[tuple[str, str]] = field(default_factory=set)
 
     def get(self, name: str) -> Interface | None:
         return next((i for i in self.interfaces if i.name == name), None)

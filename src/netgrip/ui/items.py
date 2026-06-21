@@ -263,7 +263,7 @@ class IpNode(BaseNode):
     def __init__(self, family: int, cidr: str, parent_name: str | None,
                  dynamic: bool = False, draft_id: int | None = None, alias: str = "",
                  gateway: str = "", dns: list[str] | None = None,
-                 dns_search: list[str] | None = None):
+                 dns_search: list[str] | None = None, pending_remove: bool = False):
         self.family = family
         self.cidr = cidr
         self.parent_name = parent_name
@@ -286,6 +286,10 @@ class IpNode(BaseNode):
                 lines.append("search " + " ".join(self.dns_search))
         if alias:
             lines.append(family_label)  # keep the family visible behind the name
+        if pending_remove:
+            # Address still on the link at runtime; this flags the unsaved delete
+            # that Save will write (the config owner would revert a runtime del).
+            lines.append("→ remove on Save")
         body, border = theme.ip_node(family)
         super().__init__(title, lines, body, border, dashed=self.is_draft)
         if parent_name:
@@ -298,10 +302,11 @@ class IpNode(BaseNode):
         return self.parent_name is None
 
     @classmethod
-    def from_address(cls, address: Address, parent_name: str, alias: str = "") -> IpNode:
+    def from_address(cls, address: Address, parent_name: str, alias: str = "",
+                     pending_remove: bool = False) -> IpNode:
         return cls(
             address.family, address.cidr, parent_name,
-            dynamic=address.dynamic, alias=alias,
+            dynamic=address.dynamic, alias=alias, pending_remove=pending_remove,
         )
 
 

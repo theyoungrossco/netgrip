@@ -78,6 +78,36 @@ def test_set_dhcp_drops_family_static_and_flags_lease():
     assert "DHCP=ipv4" in persist.networkd_file(cfg)
 
 
+def test_remove_address_keeps_other_static():
+    # Deleting one of several statics leaves the family manual with the rest.
+    cfg = persist.LinkConfig("eth0", addresses=["10.0.0.5/24", "10.0.0.6/24"],
+                             gateway4="10.0.0.1")
+    cfg.remove_address("10.0.0.5/24")
+    assert cfg.addresses == ["10.0.0.6/24"]
+    assert cfg.dhcp4 is False and cfg.gateway4 == "10.0.0.1"  # still static
+
+
+def test_remove_last_static_no_lease_falls_back_to_dhcp():
+    # Deleting the family's last static with no lease falls back to auto, so the
+    # profile clears (NM rejects a manual gateway with no manual address).
+    cfg = persist.LinkConfig("eth0", addresses=["10.0.0.5/24"], gateway4="10.0.0.1",
+                             dns=["9.9.9.9"])
+    cfg.remove_address("10.0.0.5/24")
+    assert cfg.dhcp4 is True
+    assert cfg.addresses == [] and cfg.gateway4 == "" and cfg.dns == []
+    plan = persist.nmcli_commands(cfg, "conn")
+    assert plan[0] == ["nmcli", "con", "mod", "conn",
+                       "ipv4.method", "auto", "ipv4.addresses", "",
+                       "ipv4.gateway", "", "ipv4.dns", ""]
+
+
+def test_remove_last_static_with_lease_keeps_dhcp():
+    # A family that still has a lease just drops the static; it stays auto.
+    cfg = persist.LinkConfig("eth0", dhcp4=True, addresses=["10.0.0.5/24"])
+    cfg.remove_address("10.0.0.5/24")
+    assert cfg.dhcp4 is True and cfg.addresses == []
+
+
 # --- systemd-networkd ------------------------------------------------------ #
 
 def test_networkd_file_static():
@@ -202,6 +232,33 @@ def test_nmcli_commands_dhcp_clears_stale_static():
         "nmcli", "con", "mod", "conn",
         "ipv4.method", "auto",
         "ipv4.addresses", "", "ipv4.gateway", "", "ipv4.dns", "",
+    ]
+
+
+def test_nmcli_commands_auto_clears_leftover_static_gateway():
+    # Removing a link's last static address leaves it DHCP-only, but a static
+    # default route outlives the address. Carrying that gateway into an auto
+    # profile makes NM fail: "gateway cannot be set if there are no addresses".
+    cfg = persist.LinkConfig("eth0", dhcp4=True, gateway4="10.99.0.1")
+    plan = persist.nmcli_commands(cfg, "conn")
+    assert plan[0] == [
+        "nmcli", "con", "mod", "conn",
+        "ipv4.method", "auto",
+        "ipv4.addresses", "", "ipv4.gateway", "", "ipv4.dns", "",
+    ]
+
+
+def test_nmcli_commands_dhcp_plus_static_coexist():
+    # A lease and a static address are a valid combo: method auto keeps the lease
+    # and adds the static on top (not lease-killing manual). Gateway stays because
+    # a manual address is present.
+    cfg = persist.LinkConfig("eth0", dhcp4=True, addresses=["10.0.0.5/24"],
+                             gateway4="10.0.0.1", dns=["9.9.9.9"])
+    plan = persist.nmcli_commands(cfg, "conn")
+    assert plan[0] == [
+        "nmcli", "con", "mod", "conn",
+        "ipv4.method", "auto", "ipv4.addresses", "10.0.0.5/24",
+        "ipv4.gateway", "10.0.0.1", "ipv4.dns", "9.9.9.9",
     ]
 
 

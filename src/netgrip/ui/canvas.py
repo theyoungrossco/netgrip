@@ -139,6 +139,7 @@ class Canvas(QGraphicsView):
         ip_groups: list[IpGroup] = []
         groups_by_iface: dict[str, list[IpGroup]] = {name: [] for name in if_nodes}
         pending_dhcp = getattr(state, "dhcp_pending", set())
+        removed_pending = getattr(state, "removed_pending", set())
         for iface in shown:
             # A family pending a switch to DHCP keeps its box even if its last
             # static address has gone, so the user can see (and Save) the switch.
@@ -150,6 +151,7 @@ class Canvas(QGraphicsView):
                     IpNode.from_address(
                         addr, iface.name,
                         alias=self._aliases.get(_alias_key(family, addr.cidr), ""),
+                        pending_remove=(iface.name, addr.cidr) in removed_pending,
                     )
                     for addr in iface.addresses_for(family)
                     if not addr.dynamic  # DHCP/RA address shows in the group header
