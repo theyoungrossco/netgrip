@@ -5,12 +5,23 @@ Uses ``QWidget.grab()`` so the window is painted offscreen — no compositor or
 visible display needed beyond a Qt platform plugin. Run from the repo root:
 
     .venv/bin/python scripts/grab_screenshots.py
+
+The store is redirected to a throwaway directory (``XDG_DATA_HOME``) so the
+README always shows the canonical auto-layout — never the developer's own
+saved box positions or leftover draft boxes from ``~/.local/share/netgrip``.
 """
 
 from __future__ import annotations
 
+import os
 import pathlib
 import sys
+import tempfile
+
+# Isolate the per-host store before netgrip imports read it, so remembered
+# positions / drafts can't leak into the screenshots. core.store reads
+# XDG_DATA_HOME on every access, so setting it here is enough.
+os.environ["XDG_DATA_HOME"] = tempfile.mkdtemp(prefix="netgrip-shots-")
 
 from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication
