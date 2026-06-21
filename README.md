@@ -40,6 +40,50 @@ you select the host.
 
 ![NetGrip's demo host: two NICs bonded with LACP, a VLAN on the bond, per-family IPv4/IPv6 group boxes carrying their gateway and DNS, and a System DNS box listing where each resolver comes from](docs/img/screenshot-demo.png)
 
+## Installing
+
+NetGrip is **alpha** software.
+
+### Linux
+
+Clone and run the installer — it sets NetGrip up in isolation and adds it to
+your application menu:
+
+```sh
+git clone https://github.com/theyoungrossco/netgrip.git
+cd netgrip
+./scripts/install-linux.sh
+```
+
+It uses [pipx](https://pipx.pypa.io/) if present, otherwise a private virtualenv,
+so it never touches your system Python. A **NetGrip** entry appears in your menu;
+`./scripts/install-linux.sh --uninstall` removes everything, and
+`sudo ./scripts/install-linux.sh --system` installs for all users.
+
+Just want the command, no menu entry?
+
+```sh
+pipx install git+https://github.com/theyoungrossco/netgrip.git
+```
+
+Requirements: Linux, Python ≥ 3.10, iproute2 ≥ 4.14 (any distro from the last
+several years). Remote hosts need only `iproute2` and an SSH server. Distribution
+packages (apt and friends) are a stated goal — see
+[docs/PACKAGING.md](docs/PACKAGING.md).
+
+### Windows (SSH client)
+
+Download the latest **`NetGrip-*-setup.exe`** from the
+[Releases page](https://github.com/theyoungrossco/netgrip/releases) and run it —
+it bundles Python and Qt, installs without an admin prompt, and adds a Start-Menu
+shortcut.
+
+On Windows NetGrip is an **SSH-only** remote control: there's no local Linux
+stack to manage, so the *Local* option is hidden. Pick a host from your
+`~/.ssh/config` (or type `user@host`) and connect over the built-in OpenSSH
+client, authenticating with your keys/agent or a password you enter when you
+select the host.
+
 ## How it works
 
 NetGrip reads network state with `ip -json` and applies changes with plain
@@ -63,32 +107,6 @@ Light / Dark) that's remembered between runs. The same demo host in dark mode:
 
 NetGrip also remembers, per host, where you place the boxes, the names you give
 IP-config boxes, and any draft configs — restored the next time you open it.
-
-## Installing
-
-NetGrip is alpha software. From source:
-
-```sh
-git clone https://github.com/theyoungrossco/netgrip.git
-cd netgrip
-python3 -m venv .venv && .venv/bin/pip install .
-.venv/bin/netgrip
-```
-
-or with [pipx](https://pipx.pypa.io/): `pipx install git+https://github.com/theyoungrossco/netgrip.git`
-
-Requirements: Linux, Python ≥ 3.10, iproute2 ≥ 4.14 (any distro from the
-last several years). Remote hosts need only `iproute2` and an SSH server.
-
-To use NetGrip as a remote control from **Windows**, install Python ≥ 3.10 and
-the built-in [OpenSSH client](https://learn.microsoft.com/windows-server/administration/openssh/openssh_install_firstuse)
-(`ssh.exe`), then `pip install`. Local management is unavailable on Windows;
-the *Local* option is hidden and only SSH hosts are offered. Key/agent auth via
-`~/.ssh/config` is the recommended path; password login depends on the Windows
-OpenSSH build honouring `SSH_ASKPASS` (it does on most current builds).
-
-Distribution packages (apt and friends) are a stated goal — see
-[docs/PACKAGING.md](docs/PACKAGING.md).
 
 ## Trying it safely
 

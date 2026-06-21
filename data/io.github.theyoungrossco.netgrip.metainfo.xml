@@ -32,6 +32,18 @@
   </provides>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.3.0" date="2026-06-21">
+      <description>
+        <p>Persistence and clarity. Changes can now Save across reboots through
+        the host's own backend (netplan, systemd-networkd, NetworkManager or
+        ifupdown), with Try (apply then auto-revert) and Apply alongside it.
+        Addresses are grouped per protocol into IPv4/IPv6 boxes carrying their
+        gateway and DNS; a System DNS box shows where each resolver comes from.
+        Adds a View menu, a legend overlay, wired/wireless glyphs, veth pairing,
+        vlan-aware bridge tags, draft VLANs, Windows as an SSH client, and
+        one-command installers for Linux and Windows.</p>
+      </description>
+    </release>
     <release version="0.1.0" date="2026-06-12">
       <description>
         <p>Initial release: canvas view, IP config move/clone by drag,

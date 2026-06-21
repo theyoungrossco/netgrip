@@ -9,6 +9,7 @@ dist/
 # Environments
 .venv/
 venv/
+.buildvenv/
 
 # Tooling
 .pytest_cache/

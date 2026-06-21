@@ -38,12 +38,37 @@ Suggested install locations:
 3. File an ITP and find a sponsor once 0.2 (persistence) lands — runtime-only
    changes are arguably too sharp an edge for archive inclusion before then.
 
-## Versioning & releases
+## Cutting a release
 
-- Semantic versioning; tags `vX.Y.Z`; the version lives only in
-  `src/netgrip/__init__.py` and `pyproject.toml`.
-- Each release updates `CHANGELOG.md` and the `<releases>` section of the
-  metainfo file (AppStream validators check it).
+Semantic versioning. The version lives in **two** files that must agree:
+`src/netgrip/__init__.py` and `pyproject.toml`. At each milestone:
+
+1. Bump the version in both files.
+2. Move `CHANGELOG.md`'s `[Unreleased]` items under a dated `[X.Y.Z]` heading and
+   fix the compare links.
+3. Add a `<release>` entry to the metainfo file (AppStream validators check it).
+4. Run `scripts/release.sh --tag --push`.
+
+`scripts/release.sh` lints, tests, builds the Linux sdist/wheel, then tags and
+pushes `vX.Y.Z`. The push triggers
+[`.github/workflows/release.yml`](../.github/workflows/release.yml), which
+rebuilds the Linux artifacts **and the Windows `setup.exe`** and publishes them
+on a GitHub Release. So installers regenerate per release with no hand-building.
+
+Don't let work pile up under `[Unreleased]` across several milestones — bump and
+tag each one. (0.2's persistence work was never tagged and had to ship folded
+into 0.3.0.)
+
+## End-user installers (no distro package yet)
+
+Until NetGrip is in distro archives, two scripts give users a one-command path:
+
+- **Linux:** `scripts/install-linux.sh` installs the app (pipx, or a private
+  venv it manages) **and** the desktop integration — `.desktop`, icon and
+  metainfo — into `~/.local` (or `/usr/local` with `--system`), so it lands in
+  the application menu. `--uninstall` reverses it.
+- **Windows:** a self-contained `setup.exe` (PyInstaller + Inno Setup) built by
+  CI on each tag — see [installer/windows/README.md](../installer/windows/README.md).
 
 ## Other targets
 
@@ -52,4 +77,5 @@ Suggested install locations:
 - **Flatpak:** blocked on design — NetGrip needs to run `ip` against the
   *host* network namespace and escalate privileges, which fights the
   sandbox. Needs investigation (`--share=network` + host command portal).
-- **pipx/PyPI:** works today; PyPI publication planned alongside v0.1 tag.
+- **pipx/PyPI:** works today; the release workflow also attaches a wheel and
+  sdist to every GitHub Release. PyPI publication still planned.

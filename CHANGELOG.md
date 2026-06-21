@@ -6,6 +6,51 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-21
+
+The work since 0.1.0 in one alpha release: persistence (Try / Apply / Save
+through the host's real backend), per-family addressing, a clarity & terminology
+pass, Windows as an SSH client, and one-command installers for Linux and Windows.
+
+### Added
+
+- **Save across reboots through the host's own backend** — netplan,
+  systemd-networkd, NetworkManager or ifupdown, auto-detected — with a
+  status-bar indicator of which backend owns the host and whether a change will
+  persist.
+- **Try / Apply / Save** for every mutation: **Apply** changes the running stack
+  (as before), **Try** applies then auto-reverts after a countdown unless you
+  keep it (a safety net against locking yourself out of a remote box), **Save**
+  persists through the detected backend.
+- **Persistent link properties** — rename, alias, MAC and MTU written as
+  systemd `.link` (udev) files beneath whichever backend owns addressing.
+- **Sudo password caching** so a multi-command action escalates at most once.
+- **IPv4/IPv6 protocol settings dialog** with a **DHCP enabled/disabled** toggle,
+  per-field Dynamic/Static pinning, and a *use DNS from DHCP* toggle (saved as
+  `ignore-auto-dns` / `UseDNS=no` / `use-dns: false`).
+- **Per-link DNS** read via `resolvectl` for resolver provenance, bucketed into
+  the IPv4/IPv6 group it belongs to; **manually added host-wide resolvers**,
+  persisted per host and shown in the System DNS box.
+- **Draft VLANs**: right-click the canvas to create a VLAN that does not exist
+  yet, give it an id, a name and addresses, then drag it onto a parent NIC or
+  bond to create it — addresses and all — in one batch. Persisted per host.
+- **veth pairs drawn as a single shared cable** (peer matched from
+  `ip -d -json link`), so a container's `veth` lands visibly on its host bridge.
+- **vlan-aware bridge port tags** shown read-only (PVID + tagged lists).
+- **Topology-aware canvas layout** that orders boxes to cut crossing connectors.
+- **View menu** — Show loopback (moved off the toolbar), **Hide offline**, and
+  **Legend** — plus Refresh as an icon and a right-aligned **?** help button.
+- **Legend overlay**: a floating, toggleable colour key for the box categories.
+- **Wired / Wireless glyph** on physical NICs, detected from sysfs
+  (`/sys/class/net/*/phy80211`).
+- **Windows support as an SSH-only client**: the *Local* option is hidden, hosts
+  come from `~/.ssh/config`, and SSH host-key prompts and password login are
+  handled gracefully.
+- **Installers**: `scripts/install-linux.sh` installs NetGrip (pipx or a private
+  venv) and adds it to the application menu; a Windows `setup.exe`
+  (PyInstaller + Inno Setup); `scripts/release.sh` and a Release CI workflow that
+  rebuild both on a `vX.Y.Z` tag.
+
 ### Changed
 
 - Addresses are now grouped, per protocol, into an **IPv4 / IPv6 box** that
@@ -30,20 +75,6 @@ adheres to [Semantic Versioning](https://semver.org/).
   follow it: the frame stays put, so leaving it reads as a detach. Dropping the
   box on another group's **title bar** attaches it there; dropping it clear of
   every group detaches it to a draft.
-
-### Added
-
-- Per-link DNS read via `resolvectl` for resolver provenance, bucketed into the
-  IPv4/IPv6 group it belongs to.
-- Manually added host-wide resolvers, persisted per host and shown in the
-  System DNS box.
-- **Addressing** Dynamic/Static selector in the IPv4/IPv6 group settings: Static
-  adds a fixed address; obtaining one via DHCP/RA is flagged as the 0.2 backend.
-- **Draft VLANs**: right-click the canvas to create a VLAN that does not exist
-  yet, give it an id, a name and addresses, then drag it onto a parent NIC or
-  bond (or use its menu) to create it — addresses and all — in one batch. A free
-  IP draft can be folded into a draft VLAN's pending addresses. Draft VLANs
-  persist per host like other drafts.
 
 ## [0.1.0] - 2026-06-14
 
@@ -79,5 +110,6 @@ First release.
   invalid input is reported inline (no stacked dialogs)
 - Demo mode (`netgrip --demo`)
 
-[Unreleased]: https://github.com/theyoungrossco/netgrip/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/theyoungrossco/netgrip/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/theyoungrossco/netgrip/compare/v0.1.0...v0.3.0
 [0.1.0]: https://github.com/theyoungrossco/netgrip/releases/tag/v0.1.0
