@@ -72,29 +72,37 @@ class Canvas(QGraphicsView):
         self._draft_vlans: list[dict] = []  # {id, vlan_id, name, cidrs, pos}
         self._aliases: dict[str, str] = {}  # _alias_key() -> user box name
         self._manual_dns: list[str] = []  # user-added host-wide resolvers
-        # An optional widget pinned to the top-right corner of the viewport (the
-        # floating Save button), floating above the scene and unaffected by
-        # scroll/zoom. Repositioned on resize; see set_corner_widget().
-        self._corner_widget = None
+        # Widgets pinned to viewport corners (the floating Save button top-right,
+        # the Legend top-left), floating above the scene and unaffected by
+        # scroll/zoom. Repositioned on resize; see set_corner_widget(). Keyed by
+        # corner so each corner holds at most one widget.
+        self._corner_widgets: dict[str, object] = {}
 
     # ------------------------------------------------------------------ #
-    # corner overlay (a viewport-pinned widget, e.g. the Save button)
+    # corner overlays (viewport-pinned widgets, e.g. Save button, Legend)
     # ------------------------------------------------------------------ #
-    def set_corner_widget(self, widget) -> None:
-        """Pin ``widget`` to the viewport's top-right corner. It is reparented
-        onto the viewport so it floats over the diagram and ignores pan/zoom."""
-        self._corner_widget = widget
+    def set_corner_widget(self, widget, corner: str = "top-right") -> None:
+        """Pin ``widget`` to a viewport corner ("top-right" or "top-left"). It is
+        reparented onto the viewport so it floats over the diagram and ignores
+        pan/zoom."""
+        self._corner_widgets[corner] = widget
         widget.setParent(self.viewport())
-        self.position_corner_widget()
+        self.position_corner_widget(corner)
 
-    def position_corner_widget(self) -> None:
-        """Pin the corner widget to the viewport's top-right. Called on resize
-        and whenever the widget changes size (e.g. the Save count grows)."""
-        widget = self._corner_widget
-        if widget is None:
-            return
+    def position_corner_widget(self, corner: str | None = None) -> None:
+        """Re-pin corner widgets. With no ``corner``, repositions every pinned
+        widget (used on resize); with one, just that corner (e.g. after the Save
+        button's text grows). Top-left sits at the margin; top-right tracks the
+        viewport's right edge so it stays anchored as the window resizes."""
         margin = 16
-        widget.move(self.viewport().width() - widget.width() - margin, margin)
+        for c in ([corner] if corner is not None else list(self._corner_widgets)):
+            widget = self._corner_widgets.get(c)
+            if widget is None:
+                continue
+            if c == "top-left":
+                widget.move(margin, margin)
+            else:  # top-right
+                widget.move(self.viewport().width() - widget.width() - margin, margin)
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)

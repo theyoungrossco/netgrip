@@ -75,6 +75,7 @@ from netgrip.ui.items import (
     SystemDns,
     VlanNode,
 )
+from netgrip.ui.legend import Legend
 from netgrip.ui.worker import run_in_background
 
 _LOCAL = "__local__"
@@ -168,6 +169,12 @@ class MainWindow(QMainWindow):
         self.save_button.hide()
         self.canvas.set_corner_widget(self.save_button)
 
+        # Floating colour key, pinned top-left. Hidden by default; the View menu
+        # toggles it and its visibility persists (see _build_view_actions).
+        self.legend = Legend(self.canvas)
+        self.legend.hide()
+        self.canvas.set_corner_widget(self.legend, "top-left")
+
         # Background re-probe so the canvas stays current on its own (see
         # AUTO_REFRESH_MS). Self-guards against interrupting the user.
         self._auto_timer = QTimer(self)
@@ -210,6 +217,14 @@ class MainWindow(QMainWindow):
         self.hide_offline_action.setCheckable(True)
         self.hide_offline_action.setChecked(QSettings().value("hide_offline", False, type=bool))
         self.hide_offline_action.toggled.connect(self._hide_offline_toggled)
+
+        # The floating colour key (legend.py). Toggling drives its visibility
+        # directly — it floats over the canvas, so no repopulate is needed.
+        self.legend_action = QAction("Legend", self)
+        self.legend_action.setCheckable(True)
+        self.legend_action.setChecked(QSettings().value("legend_visible", False, type=bool))
+        self.legend_action.toggled.connect(self._legend_toggled)
+        self.legend.setVisible(self.legend_action.isChecked())
 
     def _build_toolbar(self) -> None:
         self._build_view_actions()
@@ -258,6 +273,7 @@ class MainWindow(QMainWindow):
         view_button.setText("View")
         view_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         view_menu = QMenu(view_button)
+        view_menu.addAction(self.legend_action)
         view_menu.addAction(self.loopback_action)
         view_menu.addAction(self.hide_offline_action)
         view_button.setMenu(view_menu)
@@ -305,6 +321,13 @@ class MainWindow(QMainWindow):
         QSettings().setValue("hide_offline", checked)
         self._repopulate()
 
+    def _legend_toggled(self, checked: bool) -> None:
+        QSettings().setValue("legend_visible", checked)
+        self.legend.setVisible(checked)
+        if checked:
+            self.canvas.position_corner_widget("top-left")
+            self.legend.raise_()
+
     def _repopulate(self) -> None:
         """Redraw the canvas with the current view options. The single funnel for
         every populate call so loopback/offline toggles stay in one place."""
@@ -320,6 +343,7 @@ class MainWindow(QMainWindow):
         theme.apply_theme(QApplication.instance(), mode)
         self.save_button.setStyleSheet(theme.save_button_style())  # follow the scheme
         self.help_button.setStyleSheet(theme.help_button_style())
+        self.legend.apply_theme()  # re-tint swatches to the new scheme
         # Repaint the canvas (node colours) under the new scheme.
         self._repopulate()
 

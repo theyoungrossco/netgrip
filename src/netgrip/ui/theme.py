@@ -23,6 +23,9 @@ _scheme: str | None = None
 # Per-scheme palette of named colours. Node entries are (fill, border).
 _LIGHT = {
     "background": "#f5f6f8",
+    # A raised surface for widgets floating over the canvas (the legend), a
+    # touch off the background so the panel reads as a separate layer.
+    "panel": "#ffffff",
     "text": "#1b2430",
     "text_dim": "#5b6672",
     "edge": "#aab2bb",
@@ -43,6 +46,7 @@ _LIGHT = {
 }
 _DARK = {
     "background": "#1e2228",
+    "panel": "#262b32",
     "text": "#e6e9ee",
     "text_dim": "#9aa4b0",
     "edge": "#525a63",
@@ -59,6 +63,26 @@ _DARK = {
     "region6": ("#221d33", "#9b86cf"),
     "dns": ("#2a2e34", "#828b94"),
 }
+
+# Legend / glossary categories in display order: (label, colour key, hint). The
+# colour key indexes node(); the hint is the one-line gloss the legend and the
+# Definitions page (workstream E) share, so the two can never drift apart.
+LEGEND_CATEGORIES = [
+    ("Physical interface", "nic",
+     "A real hardware port — Wired (Ethernet) or Wireless (Wi-Fi)."),
+    ("Group (bond / bridge / team)", "group",
+     "Several interfaces joined into one logical link or L2 switch."),
+    ("Virtual interface", "vlan",
+     "A VLAN today: a tagged subinterface of one parent (id 1–4094)."),
+    ("IPv4 config", "ip4",
+     "An IPv4 address with its gateway and DNS on an interface."),
+    ("IPv6 config", "ip6",
+     "An IPv6 address with its gateway and DNS on an interface."),
+    ("System DNS", "dns",
+     "The host's name resolvers and DNS search domains."),
+    ("Loopback", "loopback",
+     "The host-internal interface (127.0.0.1 / ::1)."),
+]
 
 
 def _detect_scheme() -> str:
@@ -99,6 +123,11 @@ def _table() -> dict:
 # -- named colours ---------------------------------------------------------
 def background() -> QColor:
     return QColor(_table()["background"])
+
+
+def panel() -> QColor:
+    """A raised surface colour for widgets floating over the canvas (the legend)."""
+    return QColor(_table()["panel"])
 
 
 def text() -> QColor:
@@ -209,7 +238,7 @@ def apply_theme(app: QApplication, mode: str = "system") -> str:
 def _dark_palette() -> QPalette:
     t = _DARK
     base = QColor(t["background"])
-    panel = QColor("#262b32")
+    panel = QColor(t["panel"])
     txt = QColor(t["text"])
     pal = QPalette()
     pal.setColor(QPalette.ColorRole.Window, base)
