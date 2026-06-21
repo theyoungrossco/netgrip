@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 import netgrip
-from netgrip.core import actions, persist
+from netgrip.core import actions, persist, persist_link
 from netgrip.core.backends import Backend, detect_backend
 from netgrip.core.demo import DEMO_BACKEND, DEMO_DNS, DEMO_DNS_SEARCH, demo_interfaces
 from netgrip.core.model import (
@@ -133,6 +133,14 @@ class MainWindow(QMainWindow):
         # No runtime command exists for it (it's a backend/profile setting), so
         # like _dhcp_pending it is recorded here and applied at Save.
         self._dns_off_pending: set[tuple[str, int]] = set()
+        # Per link: which link-layer properties (name/alias/MAC/MTU) were changed
+        # at runtime but not yet persisted. Keyed by current name; Save writes a
+        # systemd .link file carrying just these (persist_link). Separate from the
+        # IP-config dirty set because .link files live beneath every backend.
+        self._link_dirty: dict[str, set[str]] = {}
+        # For a renamed link: current name → its boot/original name, so the .link
+        # rule can match by OriginalName= the device reappears under at boot.
+        self._link_origname: dict[str, str] = {}
 
         self.canvas = Canvas(self)
         self.setCentralWidget(self.canvas)
@@ -300,6 +308,8 @@ class MainWindow(QMainWindow):
         self._dhcp_pending.clear()
         self._removed_addresses.clear()
         self._dns_off_pending.clear()
+        self._link_dirty.clear()
+        self._link_origname.clear()
         self.refresh()
 
     def refresh(self) -> None:
@@ -436,6 +446,11 @@ class MainWindow(QMainWindow):
             and (iface.uses_dhcp(fam) or (name, fam) in self._dhcp_pending)
         }
         self.state.dns_off_pending = set(self._dns_off_pending)
+        # Drop link-layer dirtiness for links that have vanished (deleted, or a
+        # rename whose old name is gone) so a stale .link entry never lingers.
+        present = self.state.link_names()
+        self._link_dirty = {n: k for n, k in self._link_dirty.items() if n in present}
+        self._link_origname = {n: o for n, o in self._link_origname.items() if n in present}
         self.canvas.populate(self.state, self.loopback_action.isChecked())
         self._update_backend_indicator(backend)
         self._update_save_button()  # backend (and so write-ability) may have changed
@@ -648,6 +663,26 @@ class MainWindow(QMainWindow):
         self._unsaved |= actions.affected_links(plan) - {"lo"}
         self._update_save_button()
 
+    def _record_link_props(self, old_name: str, new_name: str, keys: set[str],
+                           boot_name: str) -> None:
+        """Record changed link-layer properties (name/alias/MAC/MTU) as unsaved,
+        so Save writes a ``.link`` file for them (persist_link). Runs only on a
+        committed change (Apply / Try-kept), like the IP-config dirty marker.
+
+        Keyed by the link's *new* name (a rename moves the entry, and drops the
+        stale old name a rename plan also marked unsaved); ``boot_name`` is the
+        device's original name, kept for the ``.link`` ``OriginalName=`` match."""
+        if not keys:
+            return
+        self._link_dirty[new_name] = self._link_dirty.pop(old_name, set()) | keys
+        prior = self._link_origname.pop(old_name, boot_name)
+        if new_name != prior:
+            self._link_origname[new_name] = prior
+        self._unsaved.add(new_name)
+        if old_name != new_name:
+            self._unsaved.discard(old_name)
+        self._update_save_button()
+
     def _set_dhcp_intent(self, name: str, family: int) -> None:
         """Record a pending switch of (name, family) to DHCP (M5). No runtime
         change: the static stays until Save writes `dhcp` and the backend reload
@@ -733,23 +768,39 @@ class MainWindow(QMainWindow):
             self._unsaved.clear()  # the links are gone (deleted); nothing to save
             self._update_save_button()
             return
+        # Link-layer changes (name/alias/MAC/MTU) persist via systemd .link files
+        # beneath the backend, so the same Save carries them (persist_link).
+        link_plan = self._link_persist_plan(links)
         saved = set(links)
         title = f"Save {len(configs)} link(s) to {backend.label}"
         # NetworkManager needs each device's connection profile resolved first;
         # read that off-thread, then build and confirm the plan.
         if backend.kind == persist.NETWORKMANAGER:
-            self._save_via_nm(title, configs, saved, backend)
+            self._save_via_nm(title, configs, saved, backend, link_plan)
             return
         try:
             plan = persist.persist_plan(configs, backend)
         except persist.PersistError as exc:
             self._show_error(str(exc))
             return
-        self._apply(title, plan, on_success=lambda: self._clear_saved(saved),
+        self._apply(title, plan + link_plan, on_success=lambda: self._clear_saved(saved),
                     settle_ms=SAVE_SETTLE_MS)
 
+    def _link_persist_plan(self, links: list[str]) -> list[list[str]]:
+        """The systemd ``.link`` write-through for any of ``links`` carrying
+        unsaved link-layer changes (name/alias/MAC/MTU); empty when none do."""
+        props = []
+        for name in links:
+            keys = self._link_dirty.get(name)
+            iface = self.state.get(name) if self.state else None
+            if keys and iface is not None:
+                match = self._link_origname.get(name, name)
+                props.append(persist_link.link_props(iface, keys, match))
+        return persist_link.plan_link_files(props)
+
     def _save_via_nm(self, title: str, configs: list[persist.LinkConfig],
-                     saved: set[str], backend: Backend) -> None:
+                     saved: set[str], backend: Backend,
+                     link_plan: list[list[str]]) -> None:
         runner = self.runner
         self._set_busy(True, "Reading NetworkManager connections…")
 
@@ -760,7 +811,8 @@ class MainWindow(QMainWindow):
             except persist.PersistError as exc:
                 self._show_error(str(exc))
                 return
-            if not plan:  # nothing nmcli can express for these links
+            plan += link_plan  # .link files persist beneath NM too
+            if not plan:  # nothing nmcli or .link can express for these links
                 self._clear_saved(saved)
                 return
             self._apply(title, plan, on_success=lambda: self._clear_saved(saved),
@@ -780,6 +832,10 @@ class MainWindow(QMainWindow):
         self._removed_addresses = {(n, c) for (n, c) in self._removed_addresses
                                    if n not in links}
         self._dns_off_pending = {(n, f) for (n, f) in self._dns_off_pending if n not in links}
+        # The .link file is written; drop the link-layer dirtiness (and its
+        # remembered boot name) for the saved links.
+        self._link_dirty = {n: k for n, k in self._link_dirty.items() if n not in links}
+        self._link_origname = {n: o for n, o in self._link_origname.items() if n not in links}
         self._update_save_button()
 
     # ------------------------------------------------------------------ #
@@ -1292,6 +1348,7 @@ class MainWindow(QMainWindow):
         plan: list[list[str]] = []
         revert: list[list[str]] = []
         changed: list[str] = []
+        keys: set[str] = set()  # which link-layer properties changed (for Save)
         # Link-level changes apply under the current name; rename goes last. The
         # revert undoes them in reverse: rename back first (so the property
         # restores below address the link by its original name).
@@ -1301,19 +1358,30 @@ class MainWindow(QMainWindow):
             plan += actions.plan_set_mtu(iface.name, dlg.mtu)
             revert += actions.plan_set_mtu(iface.name, iface.mtu)
             changed.append("MTU")
+            keys.add(persist_link.MTU)
         if dlg.mac != iface.mac:
             plan += actions.plan_set_mac(iface.name, dlg.mac)
             revert += actions.plan_set_mac(iface.name, iface.mac)
             changed.append("MAC")
+            keys.add(persist_link.MAC)
         if dlg.link_alias != iface.alias:
             plan += actions.plan_set_alias(iface.name, dlg.link_alias)
             revert += actions.plan_set_alias(iface.name, iface.alias)
             changed.append("alias")
+            keys.add(persist_link.ALIAS)
         if dlg.new_name != iface.name:
             plan += actions.plan_rename_link(iface.name, dlg.new_name, iface.is_up)
             changed.append("name")
+            keys.add(persist_link.NAME)
         if plan:
-            self._apply(f"Update {iface.name} ({', '.join(changed)})", plan, revert=revert)
+            old_name, new_name = iface.name, dlg.new_name
+            # Carry forward the boot/original name if this device was already
+            # renamed (and not yet Saved) earlier this session.
+            boot = self._link_origname.get(old_name, old_name)
+            self._apply(
+                f"Update {iface.name} ({', '.join(changed)})", plan, revert=revert,
+                on_success=lambda: self._record_link_props(old_name, new_name, keys, boot),
+            )
 
     def _ipgroup_plan(self, iface: Interface, family: int, *, address: str = "",
                       address_static: bool = False,

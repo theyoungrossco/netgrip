@@ -40,8 +40,9 @@ that detects what owns the host's network config and writes through it:
 - "runtime only" stays available as the fallback, clearly labelled
 
 The UI gains a per-host indicator of which backend is in use and whether a
-change will persist. Persistent renames/aliases (systemd `.link` files, udev)
-also land here, since they need this backend.
+change will persist. Persistent renames/aliases — and MAC/MTU — land here too,
+written as systemd `.link` files (udev) beneath whichever backend owns
+addressing (`core/persist_link.py`, milestone M6).
 
 Every mutation grows a three-way choice: **Try** (apply to the running config,
 auto-reverting host-side after a timeout unless kept — the safety net that keeps
