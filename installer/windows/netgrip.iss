@@ -41,13 +41,14 @@ PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 OutputDir={#SourceDir}\..
 OutputBaseFilename=NetGrip-{#AppVersion}-setup
-SetupIconFile=netgrip.ico
+; Relative paths resolve from this .iss file's directory (installer\windows).
+SetupIconFile=..\..\data\icons\netgrip.ico
 UninstallDisplayIcon={app}\{#AppExeName}
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
-ArchitecturesAllowed=x64compatible
-ArchitecturesInstallIn64BitMode=x64compatible
+ArchitecturesAllowed=x64
+ArchitecturesInstallIn64BitMode=x64
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"

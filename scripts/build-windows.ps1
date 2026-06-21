@@ -43,6 +43,7 @@ Write-Host "==> Building NetGrip $Version" -ForegroundColor Cyan
 
 Write-Host "==> Freezing app with PyInstaller" -ForegroundColor Cyan
 & $VenvPy -m PyInstaller --noconfirm --clean installer\windows\netgrip.spec | Out-Host
+if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed (exit $LASTEXITCODE)" }
 if (-not (Test-Path "dist\NetGrip\NetGrip.exe")) {
     throw "PyInstaller did not produce dist\NetGrip\NetGrip.exe"
 }
@@ -63,6 +64,7 @@ if (-not $Iscc) {
 
 Write-Host "==> Compiling installer with Inno Setup" -ForegroundColor Cyan
 & $Iscc "/DAppVersion=$Version" "installer\windows\netgrip.iss" | Out-Host
+if ($LASTEXITCODE -ne 0) { throw "Inno Setup (ISCC) failed (exit $LASTEXITCODE)" }
 
 $Setup = Join-Path $RepoRoot "dist\NetGrip-$Version-setup.exe"
 if (-not (Test-Path $Setup)) { throw "Installer was not produced: $Setup" }
