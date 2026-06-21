@@ -13,6 +13,15 @@ PROBE_COMMAND = ["ip", "-details", "-json", "address", "show"]
 # read: old `bridge` lacks `-json` and plain bridges return nothing useful, so a
 # failure here just leaves the tags blank.
 BRIDGE_VLAN_COMMAND = ["bridge", "-json", "vlan", "show"]
+# Wireless detection: a Wi-Fi netdev carries a `phy80211` symlink under its
+# sysfs directory. List the interfaces that have one in a single read; on a host
+# without these entries (or a non-Linux target) nothing prints and every
+# interface stays wired — the safe default. Qt-free and works over SSH.
+WIRELESS_COMMAND = [
+    "sh", "-c",
+    'for d in /sys/class/net/*/phy80211; do '
+    '[ -e "$d" ] && basename "${d%/phy80211}"; done',
+]
 # Default routes are read per family so an interface can carry both an IPv4 and
 # an IPv6 default at once (each belongs to its own protocol box).
 ROUTE_COMMANDS = {
@@ -57,6 +66,7 @@ def probe(runner: Runner) -> list[Interface]:
     interfaces = parse_addr_json(payload)
     _enrich_gateways(runner, interfaces)
     _enrich_bridge_vlans(runner, interfaces)
+    _enrich_wireless(runner, interfaces)
     return interfaces
 
 
@@ -135,6 +145,25 @@ def _enrich_bridge_vlans(runner: Runner, interfaces: list[Interface]) -> None:
         if iface is not None:
             iface.pvid = pvid
             iface.vlan_tags = tagged
+
+
+def _enrich_wireless(runner: Runner, interfaces: list[Interface]) -> None:
+    """Mark physical NICs backed by an 802.11 device (a phy80211 in sysfs).
+
+    Best-effort: a host without those sysfs entries (or a non-Linux target)
+    yields no names and every interface stays wired — never fail over it."""
+    try:
+        out = runner.run(WIRELESS_COMMAND)
+    except (RuntimeError, ValueError):
+        return  # wireless detection is a bonus; never fail the probe over it
+    wireless = parse_wireless(out)
+    for iface in interfaces:
+        iface.wireless = iface.name in wireless
+
+
+def parse_wireless(text: str) -> set[str]:
+    """Interface names with an 802.11 phy, one per line from `WIRELESS_COMMAND`."""
+    return {line.strip() for line in text.splitlines() if line.strip()}
 
 
 def parse_bridge_vlan_json(payload: list[dict]) -> dict[str, tuple[int | None, list[str]]]:

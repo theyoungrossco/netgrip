@@ -12,11 +12,13 @@ from PySide6.QtWidgets import QApplication, QGraphicsItem, QGraphicsObject, QGra
 
 from netgrip.core.actions import BOND_MODES
 from netgrip.core.model import Address, Interface
-from netgrip.ui import theme
+from netgrip.ui import glyphs, theme
 
 PAD = 9.0
 MIN_W = 165.0
 MAX_TEXT_W = 240.0
+GLYPH_SIZE = 14.0  # category glyph drawn in a box's (or region header's) top-right
+RADIUS = 6.0  # corner rounding for every box, matching the legend overlay
 
 _draft_ids = itertools.count(1)
 
@@ -75,9 +77,10 @@ class BaseNode(QGraphicsObject):
         pen = QPen(self._border, 2.0 if self.isSelected() else 1.0)
         if self._dashed:
             pen.setStyle(Qt.PenStyle.DashLine)
-        painter.fillRect(rect, self._body)
         painter.setPen(pen)
-        painter.drawRect(rect)
+        painter.setBrush(self._body)
+        painter.drawRoundedRect(rect, RADIUS, RADIUS)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
 
         painter.setFont(self._title_font)
         painter.setPen(QPen(theme.text()))
@@ -103,6 +106,15 @@ class BaseNode(QGraphicsObject):
         painter.setBrush(color)
         r = 4.0
         painter.drawEllipse(QPointF(self._w - PAD - r, PAD + r + 1), r, r)
+
+    def _paint_corner_glyph(self, painter, glyph: str, beside_dot: bool = True) -> None:
+        """Draw a category glyph in the box's top-right corner, tinted quiet so
+        the kind reads at a glance without spending a text line. Sits left of the
+        status dot (``beside_dot``) or hugs the corner when there's no dot."""
+        right = self._w - PAD - (12.0 if beside_dot else 0.0)
+        cy = PAD + 5.0  # share the status dot's vertical centre
+        rect = QRectF(right - GLYPH_SIZE, cy - GLYPH_SIZE / 2, GLYPH_SIZE, GLYPH_SIZE)
+        glyphs.paint(painter, rect, glyph, theme.text_dim())
 
     # -- interaction ------------------------------------------------------
     def itemChange(self, change, value):
@@ -201,6 +213,11 @@ class NicNode(BaseNode):
 
     def _paint_extra(self, painter) -> None:
         self._paint_status_dot(painter, self.iface.is_up)
+        # Physical NICs carry a wired/wireless glyph; loopback its loop mark.
+        if self.iface.kind == "physical":
+            self._paint_corner_glyph(painter, "wireless" if self.iface.wireless else "wired")
+        elif self.iface.kind == "loopback":
+            self._paint_corner_glyph(painter, "loopback")
 
 
 class GroupNode(BaseNode):
@@ -224,6 +241,7 @@ class GroupNode(BaseNode):
 
     def _paint_extra(self, painter) -> None:
         self._paint_status_dot(painter, self.iface.is_up)
+        self._paint_corner_glyph(painter, "group")
 
 
 class VlanNode(BaseNode):
@@ -239,6 +257,7 @@ class VlanNode(BaseNode):
 
     def _paint_extra(self, painter) -> None:
         self._paint_status_dot(painter, self.iface.is_up)
+        self._paint_corner_glyph(painter, "vlan")
 
 
 class DraftVlanNode(BaseNode):
@@ -257,6 +276,10 @@ class DraftVlanNode(BaseNode):
         body, border = theme.node("vlan")
         super().__init__(f"VLAN {vlan_id} (draft)", lines, body, border, dashed=True)
         self.key = f"draftvlan:{draft_id}"
+
+    def _paint_extra(self, painter) -> None:
+        # No status dot (it doesn't exist yet); the tag glyph hugs the corner.
+        self._paint_corner_glyph(painter, "vlan", beside_dot=False)
 
 
 def ip_key(parent_name: str, cidr: str) -> str:
@@ -312,6 +335,12 @@ class IpNode(BaseNode):
     def is_draft(self) -> bool:
         return self.parent_name is None
 
+    def _paint_extra(self, painter) -> None:
+        # IP-config boxes have no status dot (an address isn't up/down), so the
+        # protocol glyph hugs the top-right corner. Same mark for both families;
+        # the box colour says which.
+        self._paint_corner_glyph(painter, "protocol", beside_dot=False)
+
     @classmethod
     def from_address(cls, address: Address, parent_name: str, alias: str = "",
                      pending_remove: bool = False) -> IpNode:
@@ -328,11 +357,18 @@ def new_draft_id() -> int:
 class RegionNode(QGraphicsObject):
     """A frame that groups several boxes under a shared, clickable header.
 
-    Only the header strip is interactive: right-click it for the group's
-    settings, drag it to move the whole group (frame + members) together. The
-    body is inert — its area belongs to the member boxes inside (which still
-    move independently and can be dragged out) and to the empty canvas behind,
-    so the frame never swallows a click meant for a box or for the background.
+    A see-through frame (the default, e.g. System DNS) is interactive only on
+    its header strip: right-click it for the group's settings, drag it to move
+    the whole group together. Its body is inert — clicks fall through to the
+    member boxes inside (which still move independently and can be dragged out)
+    or to the canvas behind, so it never swallows a click meant for a box or for
+    the background.
+
+    A solid frame (``_body_fill`` returns a colour, e.g. an IP group) instead
+    paints an opaque body and owns its whole area: the cable entering it can't
+    show through, and right-clicking the body acts on the group exactly like
+    right-clicking its title bar. Member boxes sit above it (higher Z) so they
+    still take their own clicks.
 
     The frame carries no position of its own: it stays at the scene origin and
     its rectangle is recomputed to wrap its members whenever they move.
@@ -426,11 +462,13 @@ class RegionNode(QGraphicsObject):
         return self._rect.adjusted(-2, -2, 2, 2)
 
     def shape(self) -> QPainterPath:
-        # Only the header is "solid"; the body lets clicks fall through to the
-        # member boxes or to the canvas behind. This frees the enclosed area.
+        # A see-through frame "owns" only its header strip, so clicks in the body
+        # fall through to the member boxes or the canvas behind. A solid-bodied
+        # frame (``_body_fill``) owns its whole area, so a right-click anywhere in
+        # it acts on the group just like one on the title bar.
         path = QPainterPath()
         if not self._rect.isNull():
-            path.addRect(self._header_rect())
+            path.addRect(self._rect if self._body_fill() is not None else self._header_rect())
         return path
 
     def anchor(self) -> QPointF:
@@ -449,14 +487,50 @@ class RegionNode(QGraphicsObject):
         return self._header_rect() if not self._rect.isNull() else QRectF()
 
     # -- painting ---------------------------------------------------------
+    def _body_fill(self) -> QColor | None:
+        """Fill colour for the frame's body, or None for a see-through body.
+
+        An opaque colour makes the frame own its whole area: the cable entering
+        it is hidden behind it and the body becomes a right-click target like the
+        title bar (see :meth:`shape`). The default is None — the body stays
+        transparent (System DNS, which wraps the whole diagram, needs this so the
+        boxes it encloses keep their clicks)."""
+        return None
+
+    def _header_glyph(self) -> str | None:
+        """Category glyph key for the header, or None to draw none. Overridden
+        by subclasses that have one (e.g. System DNS); IP groups stay plain."""
+        return None
+
+    def _header_glyph_corner(self) -> bool:
+        """Whether the header glyph hugs the header's top-right corner (True) or
+        sits just right of the title text (False). A small frame like an IP
+        group looks best corner-pinned, matching its address boxes; System DNS
+        spans the whole diagram, so its far corner is useless and the glyph
+        rides beside the title instead."""
+        return False
+
     def paint(self, painter, option, widget=None) -> None:
         if self._rect.isNull():
             return
         header = self._header_rect()
+        body = self._body_fill()
+        outline = QPainterPath()
+        outline.addRoundedRect(self._rect, RADIUS, RADIUS)
+        if body is not None:
+            # An opaque body: the frame owns its whole area, so the cable
+            # entering it and the canvas behind don't show through (see the class
+            # docstring). A see-through frame leaves the body unpainted.
+            painter.fillPath(outline, body)
+        # Clip the header fill to the rounded outline so its top corners round too;
+        # the divider line below stays straight.
+        painter.save()
+        painter.setClipPath(outline)
         painter.fillRect(header, self._fill)
+        painter.restore()
         painter.setPen(QPen(self._border, 1.2))
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawRect(self._rect)
+        painter.drawPath(outline)
         painter.drawLine(header.bottomLeft(), header.bottomRight())
 
         tm = QFontMetricsF(self._title_font)
@@ -466,10 +540,22 @@ class RegionNode(QGraphicsObject):
         y = header.top() + PAD
         painter.setFont(self._title_font)
         painter.setPen(QPen(theme.text()))
-        painter.drawText(
-            QPointF(x, y + tm.ascent()),
-            tm.elidedText(self._title, Qt.TextElideMode.ElideRight, avail),
-        )
+        title = tm.elidedText(self._title, Qt.TextElideMode.ElideRight, avail)
+        painter.drawText(QPointF(x, y + tm.ascent()), title)
+        glyph = self._header_glyph()
+        if glyph:
+            if self._header_glyph_corner():
+                # Hug the header's top-right corner, like the address boxes.
+                gx = header.right() - PAD - GLYPH_SIZE
+            else:
+                # Sit just right of the title text (not the far edge: a frame
+                # like System DNS spans the diagram, so the corner is miles away).
+                gx = x + tm.horizontalAdvance(title) + 8.0
+            glyphs.paint(
+                painter,
+                QRectF(gx, y + (tm.height() - GLYPH_SIZE) / 2, GLYPH_SIZE, GLYPH_SIZE),
+                glyph, theme.text_dim(),
+            )
         y += tm.height()
         painter.setFont(self._detail_font)
         painter.setPen(QPen(theme.text_dim()))
@@ -570,6 +656,21 @@ class IpGroup(RegionNode):
         self.family = family
         self.key = f"ipgroup:{iface.name}:{family}"
 
+    def _body_fill(self) -> QColor | None:
+        # An opaque body in the family's own tint (the header colour): the
+        # address boxes — a touch more saturated — sit on it, the cable from the
+        # link doesn't show through, and the whole frame becomes a right-click
+        # target for the group's settings, not just its title bar.
+        return self._fill
+
+    def _header_glyph(self) -> str | None:
+        # Tag the family's config frame with the same protocol mark its address
+        # boxes carry (exchange arrows), right-aligned to match them.
+        return "protocol"
+
+    def _header_glyph_corner(self) -> bool:
+        return True
+
 
 class SystemDns(RegionNode):
     """Host-wide resolvers (resolv.conf), each tagged with where it comes from,
@@ -602,6 +703,9 @@ class SystemDns(RegionNode):
         lines.append("+ add resolver…")
         fill, border = theme.node("dns")
         super().__init__("System DNS", lines, fill, border, members=[])
+
+    def _header_glyph(self) -> str | None:
+        return "dns"
 
     def top_reserve(self) -> float:
         """Vertical space the title bar (plus padding) needs above the diagram,

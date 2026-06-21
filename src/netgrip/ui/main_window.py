@@ -169,10 +169,11 @@ class MainWindow(QMainWindow):
         self.save_button.hide()
         self.canvas.set_corner_widget(self.save_button)
 
-        # Floating colour key, pinned top-left. Hidden by default; the View menu
-        # toggles it and its visibility persists (see _build_view_actions).
+        # Floating colour key, pinned top-left. Shown by default; the View menu
+        # and a right-click "Hide legend" toggle it, and its visibility persists
+        # (see _build_view_actions). _build_view_actions sets its initial state.
         self.legend = Legend(self.canvas)
-        self.legend.hide()
+        self.legend.hide_requested.connect(lambda: self.legend_action.setChecked(False))
         self.canvas.set_corner_widget(self.legend, "top-left")
 
         # Background re-probe so the canvas stays current on its own (see
@@ -222,7 +223,7 @@ class MainWindow(QMainWindow):
         # directly — it floats over the canvas, so no repopulate is needed.
         self.legend_action = QAction("Legend", self)
         self.legend_action.setCheckable(True)
-        self.legend_action.setChecked(QSettings().value("legend_visible", False, type=bool))
+        self.legend_action.setChecked(QSettings().value("legend_visible", True, type=bool))
         self.legend_action.toggled.connect(self._legend_toggled)
         self.legend.setVisible(self.legend_action.isChecked())
 

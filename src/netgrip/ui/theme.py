@@ -64,24 +64,27 @@ _DARK = {
     "dns": ("#2a2e34", "#828b94"),
 }
 
-# Legend / glossary categories in display order: (label, colour key, hint). The
-# colour key indexes node(); the hint is the one-line gloss the legend and the
-# Definitions page (workstream E) share, so the two can never drift apart.
+# Legend / glossary categories in display order: (label, colour key, hint,
+# glyph key). The colour key indexes node(); the hint is the one-line gloss the
+# legend and the Definitions page (workstream E) share, so the two can never
+# drift apart; the glyph key indexes ``glyphs.paint`` (None where a category has
+# no glyph). IPv4/IPv6 share the "protocol" glyph (the exchange-arrows mark),
+# distinguished by colour alone.
 LEGEND_CATEGORIES = [
     ("Physical interface", "nic",
-     "A real hardware port — Wired (Ethernet) or Wireless (Wi-Fi)."),
+     "A real hardware port — Wired (Ethernet) or Wireless (Wi-Fi).", "wired"),
     ("Group (bond / bridge / team)", "group",
-     "Several interfaces joined into one logical link or L2 switch."),
+     "Several interfaces joined into one logical link or L2 switch.", "group"),
     ("Virtual interface", "vlan",
-     "A VLAN today: a tagged subinterface of one parent (id 1–4094)."),
+     "A VLAN today: a tagged subinterface of one parent (id 1–4094).", "vlan"),
     ("IPv4 config", "ip4",
-     "An IPv4 address with its gateway and DNS on an interface."),
+     "An IPv4 address with its gateway and DNS on an interface.", "protocol"),
     ("IPv6 config", "ip6",
-     "An IPv6 address with its gateway and DNS on an interface."),
+     "An IPv6 address with its gateway and DNS on an interface.", "protocol"),
     ("System DNS", "dns",
-     "The host's name resolvers and DNS search domains."),
+     "The host's name resolvers and DNS search domains.", "dns"),
     ("Loopback", "loopback",
-     "The host-internal interface (127.0.0.1 / ::1)."),
+     "The host-internal interface (127.0.0.1 / ::1).", "loopback"),
 ]
 
 

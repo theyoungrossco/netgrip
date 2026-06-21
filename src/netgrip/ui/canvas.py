@@ -612,10 +612,12 @@ class Canvas(QGraphicsView):
     # ------------------------------------------------------------------ #
     def contextMenuEvent(self, event) -> None:
         item = self.itemAt(event.pos())
-        # A region only "owns" its header strip (its shape), so a right-click in
-        # the body falls through to the box under it or to the empty canvas.
-        # The DNS frame is a region too, but its title bar carries the node menu
-        # (manual resolvers), not the per-family IP-group menu.
+        # A solid-bodied region (an IP group) owns its whole frame, so a
+        # right-click anywhere in it opens the group menu — same as on its title
+        # bar. A see-through region (System DNS) owns only its header strip, so a
+        # right-click in its body falls through to the box under it or the canvas.
+        # The DNS frame's title bar carries the node menu (manual resolvers), not
+        # the per-family IP-group menu.
         if isinstance(item, SystemDns):
             self.node_menu_requested.emit(item, event.globalPos())
             event.accept()

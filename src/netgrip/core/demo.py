@@ -71,7 +71,7 @@ def demo_interfaces() -> list[Interface]:
         ),
         Interface(
             name="wlan0", index=7, kind="physical", state="down",
-            mac="52:54:00:a1:b2:c6", mtu=1500,
+            mac="52:54:00:a1:b2:c6", mtu=1500, wireless=True,
         ),
         # A veth pair, both ends in this namespace (as Proxmox's firewall
         # fwln/fwpr links appear): each names the other as its peer, drawn as a

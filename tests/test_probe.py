@@ -14,6 +14,7 @@ from netgrip.core.probe import (
     parse_resolv_conf,
     parse_resolvectl_links,
     parse_route_json,
+    parse_wireless,
     probe_dns,
 )
 
@@ -186,6 +187,14 @@ def test_parse_bridge_vlan_json_splits_tagged_and_native():
     assert table["eth3"] == (1, ["20", "100-200"])
     # Access port: untagged on VLAN 20, nothing tagged.
     assert table["tap200i0"] == (20, [])
+
+
+def test_parse_wireless_lists_phy80211_devices():
+    # WIRELESS_COMMAND prints one netdev name per line for each that carries an
+    # 802.11 phy; blank lines (nothing matched the glob) yield an empty set.
+    assert parse_wireless("wlan0\nwlp3s0\n") == {"wlan0", "wlp3s0"}
+    assert parse_wireless("  wlan0  \n\n") == {"wlan0"}
+    assert parse_wireless("") == set()
 
 
 ROUTE_FIXTURE = [

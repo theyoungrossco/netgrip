@@ -64,6 +64,9 @@ class Interface:
     kind: str = "physical"  # physical | loopback | vlan | bond | bridge | veth | ...
     state: str = "down"  # up | down
     mac: str = ""
+    # A physical NIC backed by an 802.11 (Wi-Fi) device rather than Ethernet,
+    # detected from its sysfs phy80211 link. Drives the wired/wireless glyph.
+    wireless: bool = False
     mtu: int = 0
     alias: str = ""  # kernel ifalias: a human label, set with `ip link set dev X alias`
     master: str | None = None  # name of the bond/bridge this NIC is enslaved to
