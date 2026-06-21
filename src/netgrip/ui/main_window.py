@@ -20,7 +20,10 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QToolBar,
+    QToolButton,
+    QWidget,
 )
 
 import netgrip
@@ -192,7 +195,24 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ #
     # chrome
     # ------------------------------------------------------------------ #
+    def _build_view_actions(self) -> None:
+        """The canvas view toggles (checkable, persisted in QSettings). They live
+        in the toolbar's *View* dropdown rather than a menubar, so the window has
+        no separate menubar row of its own."""
+        # Loopback has its own toggle (the rest of the canvas is filtered by
+        # Hide offline); both persist across sessions.
+        self.loopback_action = QAction("Show loopback", self)
+        self.loopback_action.setCheckable(True)
+        self.loopback_action.setChecked(QSettings().value("show_loopback", False, type=bool))
+        self.loopback_action.toggled.connect(self._loopback_toggled)
+
+        self.hide_offline_action = QAction("Hide offline", self)
+        self.hide_offline_action.setCheckable(True)
+        self.hide_offline_action.setChecked(QSettings().value("hide_offline", False, type=bool))
+        self.hide_offline_action.toggled.connect(self._hide_offline_toggled)
+
     def _build_toolbar(self) -> None:
+        self._build_view_actions()
         bar = QToolBar("Main")
         bar.setMovable(False)
         self.addToolBar(bar)
@@ -215,8 +235,16 @@ class MainWindow(QMainWindow):
         self.host_combo.activated.connect(self._host_picked)
         bar.addWidget(self.host_combo)
 
-        refresh = QAction("Refresh", self)
+        # Refresh as an icon (with a text fallback where the theme has no icon);
+        # the F5 shortcut surfaces in the tooltip since the label is hidden.
+        refresh = QAction(self)
+        icon = QIcon.fromTheme("view-refresh")
+        if icon.isNull():
+            refresh.setText("Refresh")
+        else:
+            refresh.setIcon(icon)
         refresh.setShortcut(QKeySequence(Qt.Key.Key_F5))
+        refresh.setToolTip("Refresh (F5)")
         refresh.triggered.connect(self.refresh)
         bar.addAction(refresh)
 
@@ -224,16 +252,20 @@ class MainWindow(QMainWindow):
         fit.triggered.connect(self.canvas.fit_all)
         bar.addAction(fit)
 
+        # View toggles grouped under one dropdown (no menubar; see
+        # _build_view_actions).
+        view_button = QToolButton()
+        view_button.setText("View")
+        view_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        view_menu = QMenu(view_button)
+        view_menu.addAction(self.loopback_action)
+        view_menu.addAction(self.hide_offline_action)
+        view_button.setMenu(view_menu)
+        bar.addWidget(view_button)
+
         relayout = QAction("Auto-layout", self)
         relayout.triggered.connect(self.canvas.auto_layout)
         bar.addAction(relayout)
-
-        self.loopback_action = QAction("Show loopback", self)
-        self.loopback_action.setCheckable(True)
-        self.loopback_action.toggled.connect(
-            lambda checked: self.canvas.populate(self.state, checked)
-        )
-        bar.addAction(self.loopback_action)
 
         bar.addSeparator()
         bar.addWidget(QLabel(" Theme: "))
@@ -248,18 +280,48 @@ class MainWindow(QMainWindow):
         self.theme_combo.activated.connect(self._theme_picked)
         bar.addWidget(self.theme_combo)
 
-        help_menu = self.menuBar().addMenu("&Help")
-        about = QAction("About NetGrip", self)
-        about.triggered.connect(self._about)
-        help_menu.addAction(about)
+        # Push Help to the far right with an expanding spacer, then a ``?`` menu
+        # button (a menu opening a dialog is fine; hard rule 5 only forbids a
+        # dialog opening another dialog).
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        bar.addWidget(spacer)
+
+        self.help_button = QToolButton()
+        self.help_button.setText("?")
+        self.help_button.setToolTip("Help")
+        self.help_button.setStyleSheet(theme.help_button_style())
+        self.help_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        help_menu = QMenu(self.help_button)
+        help_menu.addAction("About NetGrip", self._about)
+        self.help_button.setMenu(help_menu)
+        bar.addWidget(self.help_button)
+
+    def _loopback_toggled(self, checked: bool) -> None:
+        QSettings().setValue("show_loopback", checked)
+        self._repopulate()
+
+    def _hide_offline_toggled(self, checked: bool) -> None:
+        QSettings().setValue("hide_offline", checked)
+        self._repopulate()
+
+    def _repopulate(self) -> None:
+        """Redraw the canvas with the current view options. The single funnel for
+        every populate call so loopback/offline toggles stay in one place."""
+        self.canvas.populate(
+            self.state,
+            self.loopback_action.isChecked(),
+            self.hide_offline_action.isChecked(),
+        )
 
     def _theme_picked(self, index: int) -> None:
         mode = self.theme_combo.itemData(index)
         QSettings().setValue("theme", mode)
         theme.apply_theme(QApplication.instance(), mode)
         self.save_button.setStyleSheet(theme.save_button_style())  # follow the scheme
+        self.help_button.setStyleSheet(theme.help_button_style())
         # Repaint the canvas (node colours) under the new scheme.
-        self.canvas.populate(self.state, self.loopback_action.isChecked())
+        self._repopulate()
 
     def _about(self) -> None:
         QMessageBox.about(
@@ -320,7 +382,7 @@ class MainWindow(QMainWindow):
         runner = self.runner
         if isinstance(runner, UnconnectedRunner):
             self.state = None
-            self.canvas.populate(None, self.loopback_action.isChecked())
+            self._repopulate()
             self._update_backend_indicator(None)
             self.statusBar().showMessage("Select a host to connect over SSH.")
             return
@@ -453,7 +515,7 @@ class MainWindow(QMainWindow):
         present = self.state.link_names()
         self._link_dirty = {n: k for n, k in self._link_dirty.items() if n in present}
         self._link_origname = {n: o for n, o in self._link_origname.items() if n in present}
-        self.canvas.populate(self.state, self.loopback_action.isChecked())
+        self._repopulate()
         self._update_backend_indicator(backend)
         self._update_save_button()  # backend (and so write-ability) may have changed
         dns_note = f" · DNS {', '.join(self.state.dns)}" if self.state.dns else ""
@@ -694,7 +756,7 @@ class MainWindow(QMainWindow):
         self._update_save_button()
         if self.state:
             self.state.dhcp_pending = set(self._dhcp_pending)
-            self.canvas.populate(self.state, self.loopback_action.isChecked())
+            self._repopulate()
         self.statusBar().showMessage(f"{name} IPv{family} will switch to DHCP when you Save.")
 
     def _set_dns_off_intent(self, name: str, family: int, ignore: bool) -> None:
@@ -1328,7 +1390,7 @@ class MainWindow(QMainWindow):
         self._update_save_button()
         if self.state:
             self.state.removed_pending = set(self._removed_addresses)
-            self.canvas.populate(self.state, self.loopback_action.isChecked())
+            self._repopulate()
         self.statusBar().showMessage(f"{cidr} will be removed from {name} when you Save.")
 
     def _detach_ip(self, node: IpNode) -> None:
@@ -1496,7 +1558,7 @@ class MainWindow(QMainWindow):
         else:
             # No runtime plan and no DHCP switch, but the "ignore DHCP DNS" intent
             # may have changed; redraw so its box marker appears/clears.
-            self.canvas.populate(self.state, self.loopback_action.isChecked())
+            self._repopulate()
 
     def _manual_dns_dialog(self) -> None:
         if not self.state:

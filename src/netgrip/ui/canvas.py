@@ -61,6 +61,7 @@ class Canvas(QGraphicsView):
 
         self._state: HostState | None = None
         self._show_loopback = False
+        self._hide_offline = False
         self._host_label: str | None = None  # whose persisted state is loaded
         self._positions: dict[str, QPointF] = {}  # remembered node positions
         # While the auto-layout places boxes, suppress the position saver so its
@@ -102,9 +103,12 @@ class Canvas(QGraphicsView):
     # ------------------------------------------------------------------ #
     # population & layout
     # ------------------------------------------------------------------ #
-    def populate(self, state: HostState | None, show_loopback: bool | None = None) -> None:
+    def populate(self, state: HostState | None, show_loopback: bool | None = None,
+                 hide_offline: bool | None = None) -> None:
         if show_loopback is not None:
             self._show_loopback = show_loopback
+        if hide_offline is not None:
+            self._hide_offline = hide_offline
         self._state = state
         self.setBackgroundBrush(theme.background())  # follow theme changes
         if state is not None and state.label != self._host_label:
@@ -116,9 +120,13 @@ class Canvas(QGraphicsView):
         if state is None:
             return
 
+        # Loopback has its own toggle (show_loopback); every other interface can
+        # be filtered out when down via hide_offline. Drafts are added later, so
+        # they're never affected by either.
         shown = [
             i for i in state.interfaces
-            if self._show_loopback or i.kind != "loopback"
+            if (self._show_loopback or i.kind != "loopback")
+            and not (self._hide_offline and not i.is_up and i.kind != "loopback")
         ]
         shown_names = {i.name for i in shown}
 

@@ -161,6 +161,30 @@ def save_button_style() -> str:
     """
 
 
+def help_button_style() -> str:
+    """Stylesheet for the toolbar *Help* (``?``) button: a bold question mark in
+    a circular outline so it stands out as the help affordance rather than a
+    faint glyph. Palette-aware (border/text from the theme) per the colour rule;
+    the menu-indicator arrow is suppressed so the ``?`` stays centred."""
+    border = QColor(_table()["text_dim"])
+    txt = QColor(_table()["text"])
+    return f"""
+        QToolButton {{
+            color: {txt.name()};
+            font-weight: bold;
+            font-size: 15px;
+            border: 1.5px solid {border.name()};
+            border-radius: 13px;
+            min-width: 26px;
+            max-width: 26px;
+            min-height: 26px;
+            max-height: 26px;
+        }}
+        QToolButton:hover {{ border-color: {txt.name()}; }}
+        QToolButton::menu-indicator {{ image: none; width: 0px; }}
+    """
+
+
 # -- application of the scheme --------------------------------------------
 def apply_theme(app: QApplication, mode: str = "system") -> str:
     """Resolve ``mode`` (system|light|dark), set the app palette, return scheme.
