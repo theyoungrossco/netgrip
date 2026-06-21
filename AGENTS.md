@@ -51,11 +51,22 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full tour and
    invalid input *inline* (see `dialogs._error_label`), not with a popup. The
    apply → confirm flow is fine because each input dialog has closed before the
    confirmation dialog opens — that's sequential, not nested.
-   - For a value that can be auto-assigned (DHCP/RA) or set by hand — gateway,
-     DNS — use `dialogs.DynamicStaticField`: a **Dynamic** radio shows the live
-     value greyed out and means "leave it alone", **Static** enables a custom
-     entry. Disable Static where it can't be applied (e.g. DNS without
-     systemd-resolved).
+   - For a value that can be auto-assigned (DHCP/RA) or set by hand — e.g. the
+     gateway — use `dialogs.DynamicStaticField`: a **Dynamic** radio shows the
+     live value greyed out and means "leave it alone", **Static** enables a
+     custom entry. In the IPv4/IPv6 *protocol settings* dialog these fields sit
+     under one **DHCP enabled / disabled** toggle: with DHCP off the Dynamic
+     option is hidden (every field is Static); with it on a field can still be
+     pinned Static individually. DNS is attribution-based: per-interface
+     resolvers (systemd-resolved, `iface.dns`) and host-wide resolvers inferred
+     from this link's DHCP lease (`Interface.dhcp_dns_for`) are shown read-only
+     in the box and dialog; static host-wide resolvers belong to no link, so
+     they're hidden there and edited only in the System DNS box, which the
+     protocol dialog points to. The dialog's one DNS control is a *use DNS from
+     DHCP* toggle (shown only under DHCP); turning it off is a Save-time backend
+     intent (`dns_off_pending` → `LinkConfig.set_ignore_dhcp_dns`, rendered as
+     `ignore-auto-dns` / `UseDNS=no` / `use-dns: false`), never a runtime command
+     — there isn't one. ifupdown can't express it.
 6. **Never block the UI thread.** Probes and applies run through
    `ui/worker.run_in_background`; every apply is followed by a fresh probe.
 

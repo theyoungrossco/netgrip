@@ -129,6 +129,10 @@ class MainWindow(QMainWindow):
         # `ip addr del` bounces straight back, so a delete there is a deferred
         # intent (like _dhcp_pending) applied at Save, not a runtime command.
         self._removed_addresses: set[tuple[str, str]] = set()
+        # (interface, family) the user wants to stop taking DNS from the lease.
+        # No runtime command exists for it (it's a backend/profile setting), so
+        # like _dhcp_pending it is recorded here and applied at Save.
+        self._dns_off_pending: set[tuple[str, int]] = set()
 
         self.canvas = Canvas(self)
         self.setCentralWidget(self.canvas)
@@ -295,6 +299,7 @@ class MainWindow(QMainWindow):
         self._unsaved.clear()
         self._dhcp_pending.clear()
         self._removed_addresses.clear()
+        self._dns_off_pending.clear()
         self.refresh()
 
     def refresh(self) -> None:
@@ -421,6 +426,16 @@ class MainWindow(QMainWindow):
             and any(a.cidr == cidr for a in iface.addresses)
         }
         self.state.removed_pending = set(self._removed_addresses)
+        # Re-attach "ignore DHCP DNS" intents, dropping any whose link is gone or
+        # whose family neither takes a lease nor is pending a switch to one (so
+        # there is nothing to ignore). The pending-switch case matters when the
+        # user chose DHCP + ignore together: the family is still static until Save.
+        self._dns_off_pending = {
+            (name, fam) for (name, fam) in self._dns_off_pending
+            if (iface := self.state.get(name)) is not None
+            and (iface.uses_dhcp(fam) or (name, fam) in self._dhcp_pending)
+        }
+        self.state.dns_off_pending = set(self._dns_off_pending)
         self.canvas.populate(self.state, self.loopback_action.isChecked())
         self._update_backend_indicator(backend)
         self._update_save_button()  # backend (and so write-ability) may have changed
@@ -645,6 +660,22 @@ class MainWindow(QMainWindow):
             self.canvas.populate(self.state, self.loopback_action.isChecked())
         self.statusBar().showMessage(f"{name} IPv{family} will switch to DHCP when you Save.")
 
+    def _set_dns_off_intent(self, name: str, family: int, ignore: bool) -> None:
+        """Record (or clear) the intent to stop taking DNS from the lease for
+        (name, family). No runtime change — applied at Save through the backend's
+        ignore-auto-dns. Marks the link unsaved when set; the caller redraws."""
+        key = (name, family)
+        if ignore == (key in self._dns_off_pending):
+            return  # nothing changed
+        if ignore:
+            self._dns_off_pending.add(key)
+            self._unsaved.add(name)
+        else:
+            self._dns_off_pending.discard(key)
+        self._update_save_button()
+        if self.state:
+            self.state.dns_off_pending = set(self._dns_off_pending)
+
     def _update_save_button(self) -> None:
         """Show the floating Save button only when there is something to persist
         *and* the backend can write it; otherwise hide it entirely."""
@@ -689,6 +720,8 @@ class MainWindow(QMainWindow):
             for fam in (4, 6):
                 if (name, fam) in self._dhcp_pending:
                     cfg.set_dhcp(fam)
+                if (name, fam) in self._dns_off_pending:
+                    cfg.set_ignore_dhcp_dns(fam)
             # Apply pending deletes: the address is still on the link (a managed
             # backend would revert a runtime del), so drop it from the config the
             # profile will be rewritten to.
@@ -746,6 +779,7 @@ class MainWindow(QMainWindow):
         self._dhcp_pending = {(n, f) for (n, f) in self._dhcp_pending if n not in links}
         self._removed_addresses = {(n, c) for (n, c) in self._removed_addresses
                                    if n not in links}
+        self._dns_off_pending = {(n, f) for (n, f) in self._dns_off_pending if n not in links}
         self._update_save_button()
 
     # ------------------------------------------------------------------ #
@@ -830,7 +864,7 @@ class MainWindow(QMainWindow):
         iface, family = group.iface, group.family
         menu = QMenu(self)
         menu.addAction(
-            f"IPv{family} settings (gateway, DNS)…",
+            f"IPv{family} protocol settings…",
             partial(self._ipgroup_settings_dialog, iface, family),
         )
         menu.addAction(
@@ -1348,9 +1382,17 @@ class MainWindow(QMainWindow):
     def _ipgroup_settings_dialog(self, iface: Interface, family: int) -> None:
         if not self.state:
             return
-        dlg = IpGroupDialog(self, iface, family, can_edit_dns=self.state.can_edit_dns)
+        ignore_dns = (iface.name, family) in self._dns_off_pending
+        dlg = IpGroupDialog(self, iface, family, can_edit_dns=self.state.can_edit_dns,
+                            host_dns=self.state.dns, ignore_dhcp_dns=ignore_dns)
         if not dlg.exec():
             return
+        # "Ignore DHCP DNS" is a Save-time backend intent (no runtime command).
+        # It only applies while the family is on DHCP, so choosing Static clears
+        # it; choosing DHCP records whatever the toggle says.
+        self._set_dns_off_intent(
+            iface.name, family, dlg.dhcp_enabled and not dlg.use_dhcp_dns
+        )
         # M5: choosing Dynamic for a family that is currently static is a pending
         # switch to DHCP — recorded and applied at Save (the backend reload does
         # the static→DHCP swap), not a runtime ip command. Choosing Static again
@@ -1381,6 +1423,10 @@ class MainWindow(QMainWindow):
                 f"{dlg.new_static_address} is already assigned via DHCP/RA — "
                 "pin it as static with Save."
             )
+        else:
+            # No runtime plan and no DHCP switch, but the "ignore DHCP DNS" intent
+            # may have changed; redraw so its box marker appears/clears.
+            self.canvas.populate(self.state, self.loopback_action.isChecked())
 
     def _manual_dns_dialog(self) -> None:
         if not self.state:

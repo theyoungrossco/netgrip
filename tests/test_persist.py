@@ -98,7 +98,8 @@ def test_remove_last_static_no_lease_falls_back_to_dhcp():
     plan = persist.nmcli_commands(cfg, "conn")
     assert plan[0] == ["nmcli", "con", "mod", "conn",
                        "ipv4.method", "auto", "ipv4.addresses", "",
-                       "ipv4.gateway", "", "ipv4.dns", ""]
+                       "ipv4.gateway", "", "ipv4.dns", "",
+                       "ipv4.ignore-auto-dns", "no"]
 
 
 def test_remove_last_static_with_lease_keeps_dhcp():
@@ -128,6 +129,40 @@ def test_networkd_file_dhcp_both_families():
 def test_networkd_file_dhcp_single_family():
     assert "DHCP=ipv4" in persist.networkd_file(persist.LinkConfig("eth0", dhcp4=True))
     assert "DHCP=ipv6" in persist.networkd_file(persist.LinkConfig("eth0", dhcp6=True))
+
+
+def test_ignore_dhcp_dns_only_applies_to_a_dhcp_family():
+    # Setting the flag on a static family is inert — there is no lease DNS to
+    # ignore, so no renderer should emit anything for it.
+    cfg = persist.LinkConfig("eth0", addresses=["10.0.0.5/24"])
+    cfg.set_ignore_dhcp_dns(4)
+    assert "UseDNS=no" not in persist.networkd_file(cfg)
+    assert "ignore-auto-dns" not in " ".join(persist.nmcli_commands(cfg, "conn")[0])
+    assert "use-dns" not in persist.netplan_yaml([cfg])
+
+
+def test_networkd_ignore_dhcp_dns_emits_usedns_no():
+    cfg = persist.LinkConfig("eth0", dhcp4=True, dhcp6=True)
+    cfg.set_ignore_dhcp_dns(4)
+    text = persist.networkd_file(cfg)
+    assert "[DHCPv4]\nUseDNS=no" in text
+    assert "[DHCPv6]" not in text  # only IPv4 was asked to ignore
+
+
+def test_netplan_ignore_dhcp_dns_emits_use_dns_false():
+    cfg = persist.LinkConfig("eth0", dhcp4=True)
+    cfg.set_ignore_dhcp_dns(4)
+    text = persist.netplan_yaml([cfg])
+    assert "dhcp4-overrides:" in text
+    assert "use-dns: false" in text
+
+
+def test_nmcli_ignore_dhcp_dns_sets_flag_yes():
+    cfg = persist.LinkConfig("eth0", dhcp4=True)
+    cfg.set_ignore_dhcp_dns(4)
+    args = persist.nmcli_commands(cfg, "conn")[0]
+    i = args.index("ipv4.ignore-auto-dns")
+    assert args[i + 1] == "yes"
 
 
 def test_networkd_plan_writes_then_reloads_and_reconfigures():
@@ -232,6 +267,7 @@ def test_nmcli_commands_dhcp_clears_stale_static():
         "nmcli", "con", "mod", "conn",
         "ipv4.method", "auto",
         "ipv4.addresses", "", "ipv4.gateway", "", "ipv4.dns", "",
+        "ipv4.ignore-auto-dns", "no",
     ]
 
 
@@ -245,6 +281,7 @@ def test_nmcli_commands_auto_clears_leftover_static_gateway():
         "nmcli", "con", "mod", "conn",
         "ipv4.method", "auto",
         "ipv4.addresses", "", "ipv4.gateway", "", "ipv4.dns", "",
+        "ipv4.ignore-auto-dns", "no",
     ]
 
 
@@ -259,6 +296,7 @@ def test_nmcli_commands_dhcp_plus_static_coexist():
         "nmcli", "con", "mod", "conn",
         "ipv4.method", "auto", "ipv4.addresses", "10.0.0.5/24",
         "ipv4.gateway", "10.0.0.1", "ipv4.dns", "9.9.9.9",
+        "ipv4.ignore-auto-dns", "no",
     ]
 
 

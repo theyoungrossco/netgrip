@@ -124,6 +124,25 @@ class Interface:
         """The link's DNS servers that belong to ``family`` (by server IP)."""
         return [s for s in self.dns if ip_family(s) == family]
 
+    def uses_dhcp(self, family: int) -> bool:
+        """Whether this link draws ``family`` from a DHCP/RA lease — it holds a
+        dynamic address or a dynamic default route for the family."""
+        gw = self.gateway_for(family)
+        return any(a.dynamic for a in self.addresses_for(family)) or bool(gw and gw.dynamic)
+
+    def dhcp_dns_for(self, family: int, host_dns: list[str]) -> list[str]:
+        """Host-wide resolvers of ``family`` (from resolv.conf) inferred to come
+        from *this* link's DHCP/RA lease, so they can be shown on its protocol
+        box even where systemd-resolved doesn't attribute DNS per link.
+
+        Returned only when the link uses DHCP for the family (see
+        :meth:`uses_dhcp`), so static host-wide resolvers are never mis-pinned to
+        it; empty when the link already has per-link DNS of its own (use
+        :meth:`dns_for` then) or doesn't use DHCP for the family."""
+        if self.dns_for(family) or not self.uses_dhcp(family):
+            return []
+        return [s for s in host_dns if ip_family(s) == family]
+
 
 @dataclass
 class HostState:
@@ -146,6 +165,11 @@ class HostState:
     # config (NetworkManager et al.) a runtime `ip addr del` just bounces back, so
     # the delete is deferred to Save and the box stays, flagged for removal.
     removed_pending: set[tuple[str, str]] = field(default_factory=set)
+    # (interface, family) the user wants to stop taking DNS from the DHCP/RA
+    # lease. There is no runtime command for "ignore the lease's DNS" — it is a
+    # backend/profile setting — so like dhcp_pending it is a UI intent applied at
+    # Save (LinkConfig.set_ignore_dhcp_dns), shown meanwhile as a box marker.
+    dns_off_pending: set[tuple[str, int]] = field(default_factory=set)
 
     def get(self, name: str) -> Interface | None:
         return next((i for i in self.interfaces if i.name == name), None)

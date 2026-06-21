@@ -45,6 +45,10 @@ class LinkConfig:
     gateway4: str = ""
     gateway6: str = ""
     dns: list[str] = field(default_factory=list)
+    # Per family: don't accept DNS handed out by the DHCP/RA lease (the backend's
+    # ignore-auto-dns / UseDNS=no). Only meaningful where the family takes a lease.
+    ignore_auto_dns4: bool = False
+    ignore_auto_dns6: bool = False
 
     def addresses_for(self, family: int) -> list[str]:
         return [a for a in self.addresses if _cidr_family(a) == family]
@@ -63,6 +67,18 @@ class LinkConfig:
             self.dhcp6, self.gateway6 = True, ""
         self.addresses = [a for a in self.addresses if _cidr_family(a) != family]
         self.dns = [s for s in self.dns if ip_family(s) != family]
+
+    def set_ignore_dhcp_dns(self, family: int) -> None:
+        """Mark ``family`` to ignore the lease's DNS when persisted (a Save-time
+        intent). Only takes effect in the renderers where the family is on DHCP —
+        a static family has no auto DNS to ignore."""
+        if family == 4:
+            self.ignore_auto_dns4 = True
+        else:
+            self.ignore_auto_dns6 = True
+
+    def ignore_auto_dns_for(self, family: int) -> bool:
+        return self.ignore_auto_dns4 if family == 4 else self.ignore_auto_dns6
 
     def remove_address(self, cidr: str) -> None:
         """Drop one static address from this config (a Save-applied deletion).
@@ -132,6 +148,10 @@ def networkd_file(cfg: LinkConfig) -> str:
     if cfg.gateway6:
         lines.append(f"Gateway={cfg.gateway6}")
     lines += [f"DNS={server}" for server in cfg.dns]
+    # Per-family "don't use the lease's DNS" lives in its own [DHCPvN] section.
+    for family, dhcp in ((4, cfg.dhcp4), (6, cfg.dhcp6)):
+        if dhcp and cfg.ignore_auto_dns_for(family):
+            lines += ["", f"[DHCPv{family}]", "UseDNS=no"]
     return "\n".join(lines) + "\n"
 
 
@@ -205,6 +225,10 @@ def _netplan_device(cfg: LinkConfig) -> list[str]:
     out = [f"    {cfg.name}:",
            f"      dhcp4: {_yaml_bool(cfg.dhcp4)}",
            f"      dhcp6: {_yaml_bool(cfg.dhcp6)}"]
+    # "Don't use the lease's DNS" is a per-family dhcpN-overrides knob.
+    for family, dhcp in ((4, cfg.dhcp4), (6, cfg.dhcp6)):
+        if dhcp and cfg.ignore_auto_dns_for(family):
+            out += [f"      dhcp{family}-overrides:", "        use-dns: false"]
     if cfg.addresses:
         out.append("      addresses:")
         out += [f"        - {addr}" for addr in cfg.addresses]
@@ -265,6 +289,9 @@ def _ifupdown_family(cfg: LinkConfig, family: int, method: str, dhcp: bool,
             out.append(f"    dns-nameservers {' '.join(dns)}")
         return out
     if dhcp:
+        # ifupdown has no clean per-interface "ignore DHCP DNS" knob (it lives in
+        # dhclient.conf, host-wide), so cfg.ignore_auto_dns_for(family) can't be
+        # expressed here and is silently not persisted on this backend.
         return [f"iface {cfg.name} {method} dhcp"]
     return []
 
@@ -340,12 +367,18 @@ def _nmcli_family(cfg: LinkConfig, family: int, key: str, dhcp: bool,
     # A manual gateway is only valid alongside a manual address — NM errors
     # "gateway cannot be set if there are no addresses configured" — and under
     # pure DHCP the lease provides it, so clear it when there is no static.
-    return [
+    args = [
         f"{key}.method", method,
         f"{key}.addresses", ",".join(addresses),
         f"{key}.gateway", gateway if addresses else "",
         f"{key}.dns", ",".join(cfg.dns_for(family)),
     ]
+    # Only the lease has "auto" DNS to ignore; set the flag explicitly under DHCP
+    # (so un-ignoring re-enables it), and leave it alone for a static family.
+    if dhcp:
+        args += [f"{key}.ignore-auto-dns",
+                 "yes" if cfg.ignore_auto_dns_for(family) else "no"]
+    return args
 
 
 # ---------------------------------------------------------------------------- #

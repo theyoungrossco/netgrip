@@ -160,10 +160,17 @@ def _iface_detail(iface: Interface) -> list[str]:
     return lines
 
 
-def ipgroup_detail(iface: Interface, family: int) -> list[str]:
+def ipgroup_detail(iface: Interface, family: int,
+                   host_dns: list[str] | None = None) -> list[str]:
     """The per-family settings shown in an IP group header: any DHCP/RA-assigned
-    address, plus the gateway, DNS and search the same lease hands out. Static
-    addresses are drawn as their own boxes inside the frame, not here."""
+    address, plus the gateway and the DNS this family carries.
+
+    DNS is shown when it can be attributed to this interface: per-link resolvers
+    where systemd-resolved tracks them (``iface.dns``), else the host-wide
+    resolvers (``host_dns``) inferred to come from this link's DHCP lease (see
+    ``Interface.dhcp_dns_for``). Static host-wide resolvers belong to no link and
+    are left for the System DNS box. Static addresses are drawn as their own
+    boxes inside the frame, not here."""
     lines: list[str] = []
     for addr in iface.addresses_for(family):
         if addr.dynamic:
@@ -174,6 +181,10 @@ def ipgroup_detail(iface: Interface, family: int) -> list[str]:
     servers = iface.dns_for(family)
     if servers:
         lines.append("dns " + " ".join(servers) + ("  (dhcp)" if iface.dns_dynamic else ""))
+    elif host_dns:
+        dhcp_dns = iface.dhcp_dns_for(family, host_dns)
+        if dhcp_dns:
+            lines.append("dns " + " ".join(dhcp_dns) + "  (dhcp)")
     if iface.dns_search:
         lines.append("search " + " ".join(iface.dns_search))
     return lines
@@ -542,13 +553,18 @@ class IpGroup(RegionNode):
     attaching another address to this interface."""
 
     def __init__(self, iface: Interface, family: int, members: list[BaseNode],
-                 pending_dhcp: bool = False):
+                 pending_dhcp: bool = False, host_dns: list[str] | None = None,
+                 pending_dns_off: bool = False):
         fill, border = theme.region(family)
-        detail = ipgroup_detail(iface, family)
+        detail = ipgroup_detail(iface, family, host_dns)
         if pending_dhcp:
             # The family still holds its static address at runtime; this flags
             # the unsaved switch to DHCP that Save will write (M5).
             detail = [*detail, "→ DHCP on Save"]
+        if pending_dns_off:
+            # Unsaved intent to stop taking DNS from the lease; Save writes the
+            # backend's ignore-auto-dns. No runtime change until then.
+            detail = [*detail, "→ ignore DHCP DNS on Save"]
         super().__init__(f"IPv{family}", detail, fill, border, members)
         self.iface = iface
         self.family = family

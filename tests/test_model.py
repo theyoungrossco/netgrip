@@ -31,6 +31,39 @@ def test_interface_families_and_per_family_helpers():
     assert eth0.dns_for(6) == ["2001:db8::1"]
 
 
+def test_dhcp_dns_for_attributes_global_resolvers_to_a_dhcp_link():
+    from netgrip.core.model import Address
+    host_dns = ["192.168.1.1", "9.9.9.9", "2001:db8::1"]
+
+    # A link with a DHCP lease (dynamic address) and no per-link DNS: the
+    # host-wide IPv4 resolvers are inferred to come from its lease.
+    dhcp_link = Interface(
+        name="eth0",
+        addresses=[Address("192.168.1.10", 24, 4, dynamic=True)],
+        gateways={4: Gateway("192.168.1.1", dynamic=True)},
+    )
+    assert dhcp_link.uses_dhcp(4) is True
+    assert dhcp_link.dhcp_dns_for(4, host_dns) == ["192.168.1.1", "9.9.9.9"]
+    assert dhcp_link.dhcp_dns_for(6, host_dns) == []  # no IPv6 lease here
+
+    # A statically configured link must not have global resolvers pinned to it.
+    static_link = Interface(
+        name="eth1",
+        addresses=[Address("10.0.0.5", 24, 4)],
+        gateways={4: Gateway("10.0.0.1")},
+    )
+    assert static_link.uses_dhcp(4) is False
+    assert static_link.dhcp_dns_for(4, host_dns) == []
+
+    # A link that already has per-link DNS uses that, not the global fallback.
+    resolved_link = Interface(
+        name="eth2",
+        addresses=[Address("172.16.0.5", 24, 4, dynamic=True)],
+        dns=["172.16.0.1"],
+    )
+    assert resolved_link.dhcp_dns_for(4, host_dns) == []
+
+
 def test_configured_families_keeps_box_for_orphaned_gateway_or_dns():
     from netgrip.core.model import Address
     # An address makes a family configured (same as families()).

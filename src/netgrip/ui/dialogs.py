@@ -9,6 +9,7 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QButtonGroup,
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -59,6 +60,14 @@ def _error_label() -> QLabel:
     return label
 
 
+def _hint_label(text: str = "") -> QLabel:
+    """A dim, word-wrapping label for inline hints and notes."""
+    label = QLabel(text)
+    label.setStyleSheet(f"color: {theme.text_dim().name()};")
+    label.setWordWrap(True)
+    return label
+
+
 class DynamicStaticField(QWidget):
     """A value with a Dynamic / Static toggle.
 
@@ -66,6 +75,11 @@ class DynamicStaticField(QWidget):
     read-only, and means "leave it as it is". *Static* enables the field to
     type a custom value. When ``allow_static`` is false the Static option is
     disabled (e.g. per-link DNS with no systemd-resolved present).
+
+    The Dynamic option can also be hidden at runtime via
+    :meth:`set_dynamic_allowed` — used when DHCP is switched off for a whole
+    protocol, where every field must be Static and offering "Dynamic" would be
+    a lie (there is no lease to defer to).
     """
 
     def __init__(self, current: str = "", is_dynamic: bool = True,
@@ -75,7 +89,9 @@ class DynamicStaticField(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        radios = QHBoxLayout()
+        self._radio_row = QWidget()
+        radios = QHBoxLayout(self._radio_row)
+        radios.setContentsMargins(0, 0, 0, 0)
         self._dynamic_btn = QRadioButton("Dynamic")
         self._static_btn = QRadioButton("Static")
         self._static_btn.setEnabled(allow_static)
@@ -85,7 +101,7 @@ class DynamicStaticField(QWidget):
         radios.addWidget(self._dynamic_btn)
         radios.addWidget(self._static_btn)
         radios.addStretch(1)
-        layout.addLayout(radios)
+        layout.addWidget(self._radio_row)
 
         self._edit = QLineEdit(current)
         self._edit.setPlaceholderText(placeholder)
@@ -103,6 +119,15 @@ class DynamicStaticField(QWidget):
         self._edit.setEnabled(not dynamic)
         if dynamic:
             self._edit.setText(self._current)
+
+    def set_dynamic_allowed(self, allowed: bool) -> None:
+        """Show or hide the Dynamic option. When disallowed, the row of radios
+        is hidden and the field locks to Static (a plain editable value) — there
+        is nothing dynamic to defer to (DHCP is off for the protocol)."""
+        self._radio_row.setVisible(allowed)
+        if not allowed:
+            self._static_btn.setChecked(True)
+        self._sync()
 
     @property
     def is_static(self) -> bool:
@@ -239,12 +264,18 @@ class LinkPropertiesDialog(QDialog):
 
 
 class IpGroupDialog(QDialog):
-    """Per-family settings for one interface: the address (static or
-    DHCP/RA-assigned), default gateway, DNS servers and search domains —
-    everything a DHCP/RA lease for this family hands out.
+    """Per-family *protocol settings* for one interface: whether the family is
+    driven by DHCP/RA or configured statically, plus the address and default
+    gateway it carries.
 
-    Address, gateway and DNS each use a Dynamic/Static toggle: Dynamic leaves
-    the current (often DHCP-assigned) value alone, Static applies a custom one.
+    A single **DHCP enabled / disabled** toggle leads. With DHCP enabled the
+    address and gateway default to the lease but each can be pinned Static
+    (e.g. DHCP address, static gateway); with it disabled every field is Static
+    and the Dynamic option is hidden, since there is no lease to defer to.
+
+    DNS is deliberately *not* edited here. Resolvers apply host-wide (they live
+    in resolv.conf, not per-protocol), so they are owned by the System DNS box;
+    this dialog only points there.
 
     The same dialog backs three flows: per-family *settings* on an existing
     interface, *adding* a family's config to one that has none yet, and
@@ -253,9 +284,10 @@ class IpGroupDialog(QDialog):
     """
 
     def __init__(self, parent, iface: Interface, family: int, can_edit_dns: bool = False,
-                 *, title: str | None = None, initial_static: str = ""):
+                 *, title: str | None = None, initial_static: str = "",
+                 host_dns: list[str] | None = None, ignore_dhcp_dns: bool = False):
         super().__init__(parent)
-        self.setWindowTitle(title or f"{iface.name} · IPv{family} settings")
+        self.setWindowTitle(title or f"{iface.name} · IPv{family} protocol settings")
         self._iface = iface
         self._family = family
         gw = iface.gateway_for(family)
@@ -276,52 +308,64 @@ class IpGroupDialog(QDialog):
         self.new_static_address = ""
         self.gateway_static = False
         self.gateway = gw.address if gw else ""
+        # DNS is not edited here (host-wide, see class docstring). Kept as empty
+        # results so the shared apply/draft code paths stay untouched.
         self.dns_static = False
-        self.dns_servers: list[str] = iface.dns_for(family)
-        self.dns_search: list[str] = list(iface.dns_search)
+        self.dns_servers: list[str] = []
+        self.dns_search: list[str] = []
 
         form = QFormLayout(self)
-        # Addressing: Dynamic (DHCP/RA) leaves the lease alone; Static sets a
-        # fixed address. A DHCP/RA lease pre-fills Dynamic (greyed); otherwise
-        # default to Static with the field editable — for a static address it
-        # pre-fills it (M2), and for a family with no address yet (adding config)
-        # it lets the user just type one. Defaulting an address-less family to
-        # Dynamic was a trap: Dynamic is a runtime no-op (starting a DHCP client
-        # is the 0.2 backend), so OK applied nothing and the add seemed to fail.
+        # The lead control: is this protocol driven by DHCP/RA, or static? A
+        # family already holding a lease opens DHCP-enabled; a static one (or a
+        # family with no address yet, where Dynamic would be a runtime no-op
+        # until the 0.2 backend starts a client) opens DHCP-disabled.
+        self._dhcp_on = QRadioButton("DHCP enabled (dynamic)")
+        self._dhcp_off = QRadioButton("DHCP disabled (static)")
+        mode_group = QButtonGroup(self)
+        mode_group.addButton(self._dhcp_on)
+        mode_group.addButton(self._dhcp_off)
+        mode_row = QWidget()
+        mode_layout = QHBoxLayout(mode_row)
+        mode_layout.setContentsMargins(0, 0, 0, 0)
+        mode_layout.addWidget(self._dhcp_on)
+        mode_layout.addWidget(self._dhcp_off)
+        mode_layout.addStretch(1)
+        form.addRow("Protocol:", mode_row)
+        self._mode_hint = _hint_label()
+        form.addRow("", self._mode_hint)
+
         self._addr_field = DynamicStaticField(
             current=dyn_addr.cidr if dyn_addr else prefill_static,
             is_dynamic=bool(dyn_addr),
             placeholder="e.g. 192.168.1.20/24" if family == 4 else "e.g. 2001:db8::20/64",
         )
-        form.addRow("Addressing:", self._addr_field)
-        addr_hint = QLabel(
-            "Static sets a fixed address now and replaces any DHCP/RA one on this "
-            "family. Dynamic switches the family to DHCP — applied when you Save, "
-            "where the backend swaps the static for a lease."
-        )
-        addr_hint.setStyleSheet("color: #777;")
-        addr_hint.setWordWrap(True)
-        form.addRow("", addr_hint)
+        form.addRow("Address:", self._addr_field)
         self._gw_field = DynamicStaticField(
             current=gw.address if gw else "",
             is_dynamic=(gw.dynamic if gw else True),
             placeholder="e.g. 192.168.1.1" if family == 4 else "e.g. 2001:db8::1",
         )
         form.addRow("Default gateway:", self._gw_field)
-        self._dns_field = DynamicStaticField(
-            current=" ".join(iface.dns_for(family)), is_dynamic=True,
-            placeholder="space-separated, e.g. 1.1.1.1 9.9.9.9",
-            allow_static=can_edit_dns,
-        )
-        form.addRow("DNS servers:", self._dns_field)
-        self._search_edit = QLineEdit(" ".join(iface.dns_search))
-        self._search_edit.setEnabled(can_edit_dns)
-        self._search_edit.setPlaceholderText("space-separated, e.g. lan.example")
-        form.addRow("Search domains:", self._search_edit)
-        if not can_edit_dns:
-            hint = QLabel("Setting DNS needs systemd-resolved (full support in 0.2).")
-            hint.setStyleSheet("color: #777;")
-            form.addRow("", hint)
+
+        # No DNS *field* — resolvers can't be typed per protocol. There is a
+        # single toggle for whether to accept the lease's DNS (a Save-time
+        # backend setting; no runtime command), shown only under DHCP. Below it,
+        # a read-only note shows the DNS that is actually attributable to this
+        # link: per-link servers (systemd-resolved) or the host-wide ones
+        # inferred from its DHCP lease; otherwise it points at the System DNS box.
+        self._per_link = iface.dns_for(family)
+        self._dhcp_dns = iface.dhcp_dns_for(family, host_dns or [])
+        self._use_dhcp_dns = QCheckBox("Use DNS provided by DHCP")
+        self._use_dhcp_dns.setChecked(not ignore_dhcp_dns)
+        self._use_dhcp_dns.toggled.connect(self._update_dns_note)
+        form.addRow("DNS:", self._use_dhcp_dns)
+        self._dns_note = _hint_label()
+        form.addRow("", self._dns_note)
+
+        self._dhcp_on.toggled.connect(self._sync_mode)
+        self._dhcp_on.setChecked(bool(dyn_addr))
+        self._dhcp_off.setChecked(not dyn_addr)
+        self._sync_mode()
 
         self._error = _error_label()
         form.addRow(self._error)
@@ -333,10 +377,64 @@ class IpGroupDialog(QDialog):
         buttons.rejected.connect(self.reject)
         form.addRow(buttons)
 
+    def _sync_mode(self) -> None:
+        """Reflect the DHCP toggle: when off, every field is Static (the Dynamic
+        option is hidden) and there is no lease DNS to accept; when on, fields may
+        be pinned Static individually and the 'use DHCP DNS' toggle applies."""
+        dhcp = self._dhcp_on.isChecked()
+        self._addr_field.set_dynamic_allowed(dhcp)
+        self._gw_field.set_dynamic_allowed(dhcp)
+        self._use_dhcp_dns.setVisible(dhcp)
+        if dhcp:
+            self._mode_hint.setText(
+                "Address and gateway are assigned by DHCP/RA. Pin a field to "
+                "Static to override just that one."
+            )
+        else:
+            self._mode_hint.setText(
+                "Set the address and gateway by hand. Nothing on this protocol is "
+                "auto-assigned."
+            )
+        self._update_dns_note()
+
+    def _update_dns_note(self) -> None:
+        """The read-only DNS line under the toggle, for the current mode."""
+        if not self._dhcp_on.isChecked():
+            self._dns_note.setText(
+                "Managed host-wide — set resolvers in the System DNS box."
+            )
+        elif not self._use_dhcp_dns.isChecked():
+            self._dns_note.setText(
+                "The lease's DNS will be ignored — set resolvers in the System "
+                "DNS box."
+            )
+        elif self._per_link:
+            self._dns_note.setText(
+                "From this link: " + " ".join(self._per_link)
+                + ("  (DHCP)" if self._iface.dns_dynamic else "")
+            )
+        elif self._dhcp_dns:
+            self._dns_note.setText("From DHCP: " + " ".join(self._dhcp_dns))
+        else:
+            self._dns_note.setText("Provided by DHCP.")
+
+    @property
+    def dhcp_enabled(self) -> bool:
+        return self._dhcp_on.isChecked()
+
+    @property
+    def use_dhcp_dns(self) -> bool:
+        return self._use_dhcp_dns.isChecked()
+
     def _accept(self) -> None:
+        dhcp = self._dhcp_on.isChecked()
+        # DHCP off forces Static everywhere; DHCP on honours each field's toggle.
+        address_static = (not dhcp) or self._addr_field.is_static
+        gateway_static = (not dhcp) or self._gw_field.is_static
+
         new_static = ""
         addr = self._addr_field.value()
-        if self._addr_field.is_static and addr:
+        if address_static and addr:
             try:
                 parsed = ipaddress.ip_interface(addr)
             except ValueError:
@@ -347,26 +445,17 @@ class IpGroupDialog(QDialog):
                 return
             new_static = parsed.with_prefixlen
         gw = self._gw_field.value()
-        if self._gw_field.is_static and gw:
+        if gateway_static and gw:
             if not valid_ipaddr(gw):
                 self._error.setText(f"'{gw}' is not a valid gateway address.")
                 return
             if ip_family(gw) != self._family:
                 self._error.setText(f"The gateway must be an IPv{self._family} address.")
                 return
-        servers = self._dns_field.value().split()
-        if self._dns_field.is_static:
-            bad = next((s for s in servers if not valid_ipaddr(s)), None)
-            if bad:
-                self._error.setText(f"'{bad}' is not a valid DNS server address.")
-                return
-        self.address_static = self._addr_field.is_static
+        self.address_static = address_static
         self.new_static_address = new_static
-        self.gateway_static = self._gw_field.is_static
-        self.gateway = gw
-        self.dns_static = self._dns_field.is_static
-        self.dns_servers = servers
-        self.dns_search = self._search_edit.text().split()
+        self.gateway_static = gateway_static
+        self.gateway = gw if gateway_static else ""
         self.accept()
 
 
