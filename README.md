@@ -11,7 +11,9 @@
 [![Python](https://img.shields.io/badge/python-%E2%89%A5%203.10-blue.svg)](pyproject.toml)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20(SSH)-lightgrey.svg)](#installing)
 [![Status: alpha](https://img.shields.io/badge/status-alpha-orange.svg)](#status)
+[![Website](https://img.shields.io/badge/web-netgrip.org-blue.svg)](https://netgrip.org)
 
+[Website](https://netgrip.org) ·
 [Installing](#installing) ·
 [How it works](#how-it-works) ·
 [Try it safely](#trying-it-safely) ·
@@ -203,6 +205,13 @@ Contributions are very welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for th
 development setup and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for a tour of
 the code. The backend core is plain Python with no Qt dependency, so there is
 plenty to do even if GUI code isn't your thing.
+
+## Contact
+
+Project home: [netgrip.org](https://netgrip.org). Questions, bug reports and
+feedback are welcome — open an issue on
+[GitHub](https://github.com/theyoungrossco/netgrip/issues) or email
+[hello@netgrip.org](mailto:hello@netgrip.org).
 
 ## License
 

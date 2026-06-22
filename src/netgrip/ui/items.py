@@ -233,7 +233,6 @@ class GroupNode(BaseNode):
             lines.append(iface.kind)
         if iface.kind == "bridge" and iface.bridge_vlan_aware:
             lines.append("vlan-aware")
-        lines.append(f"{member_count} member{'s' if member_count != 1 else ''}")
         body, border = theme.node("group")
         super().__init__(iface.name, lines, body, border)
         self.iface = iface
