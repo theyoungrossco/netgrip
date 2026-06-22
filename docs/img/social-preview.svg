@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640">
+  <!-- GitHub social preview: flat squares + straight lines, like the app canvas itself. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#283643"/>
+      <stop offset="1" stop-color="#1c2832"/>
+    </linearGradient>
+    <style>
+      text { font-family: 'DejaVu Sans', 'Segoe UI', sans-serif; }
+    </style>
+  </defs>
+
+  <!-- backdrop -->
+  <rect width="1280" height="640" fill="url(#bg)"/>
+
+  <!-- faint canvas frame, like the app's scene border -->
+  <rect x="40" y="40" width="1200" height="560" rx="18" fill="none" stroke="#3a4b5c" stroke-width="2"/>
+
+  <!-- ================= left: wordmark ================= -->
+  <g transform="translate(96,232)">
+    <!-- logo glyph -->
+    <g transform="scale(0.86)">
+      <rect width="128" height="128" rx="14" fill="#2b3a4a" stroke="#46596b" stroke-width="1.5"/>
+      <g stroke="#8a949e" stroke-width="3">
+        <line x1="38" y1="64" x2="74" y2="36"/>
+        <line x1="38" y1="64" x2="74" y2="92"/>
+      </g>
+      <rect x="14" y="48" width="32" height="32" fill="#e7eef5" stroke="#46729c" stroke-width="3"/>
+      <rect x="74" y="22" width="28" height="28" fill="#e0f0dc" stroke="#3f8a44" stroke-width="3"/>
+      <rect x="74" y="78" width="28" height="28" fill="#e9e2f6" stroke="#6d51a8" stroke-width="3"/>
+      <circle cx="41" cy="53" r="3.5" fill="#2e9e4f"/>
+    </g>
+  </g>
+
+  <g transform="translate(96,420)">
+    <text x="0" y="0" font-size="92" font-weight="700" fill="#f1f5f9" letter-spacing="-1">NetGrip</text>
+    <text x="4" y="58" font-size="29" font-weight="400" fill="#9fb0c0">Visual, drag-and-drop network</text>
+    <text x="4" y="98" font-size="29" font-weight="400" fill="#9fb0c0">interface management for Linux</text>
+  </g>
+
+  <!-- ================= right: topology vignette ================= -->
+  <g transform="translate(640,150)" font-family="DejaVu Sans, sans-serif">
+    <!-- connecting lines, centre-to-centre, drawn first so boxes sit on top -->
+    <g stroke="#7f8b97" stroke-width="2.5" fill="none">
+      <line x1="150" y1="78" x2="330" y2="55"/>
+      <line x1="150" y1="78" x2="330" y2="190"/>
+      <line x1="300" y1="290" x2="380" y2="290"/>
+    </g>
+
+    <!-- physical NIC: eth0 -->
+    <g>
+      <rect x="40" y="48" width="110" height="60" rx="6" fill="#27333f" stroke="#5b7da3" stroke-width="2.5"/>
+      <circle cx="138" cy="60" r="4" fill="#2e9e4f"/>
+      <text x="54" y="76" font-size="20" font-weight="700" fill="#dbe6f0">eth0</text>
+      <text x="54" y="97" font-size="13" fill="#8ea0b2">uplink · 1500</text>
+    </g>
+
+    <!-- IPv4 group -->
+    <g>
+      <rect x="330" y="22" width="150" height="66" rx="6" fill="#22332a" stroke="#3f8a44" stroke-width="2.5"/>
+      <text x="344" y="46" font-size="18" font-weight="700" fill="#a9e2ad">IPv4</text>
+      <text x="344" y="66" font-size="12" fill="#86b58a">192.168.1.10/24</text>
+      <text x="344" y="81" font-size="12" fill="#86b58a">gw 192.168.1.1</text>
+    </g>
+
+    <!-- IPv6 group -->
+    <g>
+      <rect x="330" y="160" width="150" height="60" rx="6" fill="#2c2839" stroke="#6d51a8" stroke-width="2.5"/>
+      <text x="344" y="184" font-size="18" font-weight="700" fill="#c5b6e6">IPv6</text>
+      <text x="344" y="204" font-size="12" fill="#a594c9">2001:db8:1::1/64</text>
+    </g>
+
+    <!-- bond -->
+    <g>
+      <rect x="190" y="262" width="110" height="56" rx="6" fill="#3a3322" stroke="#b08a3c" stroke-width="2.5"/>
+      <text x="204" y="287" font-size="18" font-weight="700" fill="#e6cf9a">bond0</text>
+      <text x="204" y="306" font-size="12" fill="#c2a86f">LACP</text>
+    </g>
+
+    <!-- VLAN on bond -->
+    <g>
+      <rect x="380" y="262" width="120" height="56" rx="6" fill="#27333f" stroke="#5b7da3" stroke-width="2.5"/>
+      <text x="394" y="287" font-size="18" font-weight="700" fill="#dbe6f0">VLAN 40</text>
+      <text x="394" y="306" font-size="12" fill="#8ea0b2">on bond0</text>
+    </g>
+  </g>
+
+  <!-- footer hint -->
+  <text x="640" y="566" font-size="20" fill="#7e8f9f" text-anchor="middle">Every change is a plan you confirm before it runs · ip -json · Linux &amp; remote SSH</text>
+</svg>
