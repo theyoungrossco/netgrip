@@ -38,3 +38,19 @@ You don't need a Windows box: pushing a `vX.Y.Z` tag runs
 builds this installer on a `windows-latest` runner and attaches it to the GitHub
 Release alongside the Linux artifacts. See
 [docs/PACKAGING.md](../../docs/PACKAGING.md#cutting-a-release).
+
+### Insider build (just the exe, no release)
+
+To get a test installer off any branch without cutting a release, run the
+[`Windows insider build`](../../.github/workflows/windows-insider.yml) workflow
+from the **Actions** tab ("Run workflow" → pick the branch). It builds **only**
+the `setup.exe` — no unit-test gate, no Linux dist, no GitHub Release — and
+uploads it as the `windows-insider-installer` artifact (kept 14 days). The exe is
+stamped with an insider version like `NetGrip-0.3.0-insider.42-a1b2c3d-setup.exe`
+so it's never confused with a real release. It shares the installer AppId with
+releases, so it upgrades/replaces an installed NetGrip rather than installing
+alongside it.
+
+> `workflow_dispatch` workflows only show a "Run workflow" button once the file
+> is on the repo's **default branch**. So this workflow has to be on `main` to be
+> launchable, even though you then point it at `dev`.

@@ -19,7 +19,12 @@
 [CmdletBinding()]
 param(
     # Skip rebuilding the venv if it already exists (faster local iteration).
-    [switch]$ReuseVenv
+    [switch]$ReuseVenv,
+
+    # Appended to the package version for the installer's AppVersion and output
+    # filename. The insider workflow passes e.g. "-insider.42-a1b2c3d" to mark a
+    # non-release test build; empty (default) yields a clean release version.
+    [string]$VersionSuffix = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -39,6 +44,7 @@ if (-not ($ReuseVenv -and (Test-Path $VenvPy))) {
 
 # Single source of truth for the version: the installed package.
 $Version = (& $VenvPy -c "import netgrip; print(netgrip.__version__)").Trim()
+if ($VersionSuffix) { $Version = "$Version$VersionSuffix" }
 Write-Host "==> Building NetGrip $Version" -ForegroundColor Cyan
 
 Write-Host "==> Freezing app with PyInstaller" -ForegroundColor Cyan

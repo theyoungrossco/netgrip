@@ -1,0 +1,42 @@
+name: Windows insider build
+
+# On-demand Windows installer for testing — builds ONLY the setup.exe and
+# uploads it as a workflow artifact. No unit-test gate, no Linux dist, no GitHub
+# Release (unlike release.yml). Trigger it from the Actions tab with "Run
+# workflow" and pick the branch you want built (e.g. dev).
+#
+# The exe is stamped with an insider version (e.g. NetGrip-0.3.0-insider.42-a1b2c3d-setup.exe)
+# so it can't be mistaken for a real release build. It shares the installer
+# AppId with releases, so installing it upgrades/replaces an installed NetGrip
+# rather than living side by side.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-installer:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+      - name: Compute insider version suffix
+        id: ver
+        shell: pwsh
+        run: |
+          $short = "${{ github.sha }}".Substring(0, 7)
+          "suffix=-insider.${{ github.run_number }}-$short" >> $env:GITHUB_OUTPUT
+      - name: Build insider installer (PyInstaller + Inno Setup)
+        run: >
+          powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1
+          -VersionSuffix "${{ steps.ver.outputs.suffix }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-insider-installer
+          path: dist/NetGrip-*-setup.exe
+          retention-days: 14
