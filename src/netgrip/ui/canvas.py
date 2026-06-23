@@ -242,24 +242,19 @@ class Canvas(QGraphicsView):
             graph_edges.append((if_nodes[group.iface.name].key, group.key))
         graph_edges.extend(container_edges)
 
-        # Layout-only edges (placement, not drawn): tie the docker subgraph to
-        # the host uplink so it flows rightward *from the physical NIC* instead
-        # of floating with its bridge stuck in column 0. Containers hang off the
-        # uplink (their traffic egresses through it; their published ports show
-        # as the dashed PortEdges below), which puts the uplink at column 0, the
-        # containers next, then their bridges — never a bridge on the left. A
-        # container-less docker bridge attaches directly so it flows right too.
+        # Layout-only edges (placement, not drawn): tie each container to the
+        # host uplink so a container-bearing docker network flows rightward *from
+        # the physical NIC* — uplink → container → bridge → bridge IP — instead of
+        # its bridge floating in column 0. (A container's traffic egresses through
+        # the uplink; its published ports also show as the dashed PortEdges
+        # below.) A docker bridge with NO containers — e.g. an unused docker0 —
+        # carries nothing from the host, so it is deliberately left OUT here and
+        # floats as its own island rather than crowding the uplink's column.
         uplink = state.uplink()
         uplink_node = if_nodes.get(uplink.name) if uplink else None
         layout_edges = list(graph_edges)
         if uplink_node is not None:
-            bridges_with_containers = {a for a, _ in container_edges}
             layout_edges += [(uplink_node.key, n.key) for n in container_nodes]
-            layout_edges += [
-                (uplink_node.key, if_nodes[n.bridge].key)
-                for n in state.docker_networks
-                if n.bridge in shown_names and if_nodes[n.bridge].key not in bridges_with_containers
-            ]
 
         # Physical NICs seed the left column; everything flows rightward from
         # them. The priority order (physical first, loopback last, then by name)
