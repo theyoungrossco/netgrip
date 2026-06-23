@@ -14,7 +14,7 @@ from __future__ import annotations
 import os
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QPalette
+from PySide6.QtGui import QColor, QPalette, QPen
 from PySide6.QtWidgets import QApplication
 
 # Resolved once via apply()/scheme(); "light" or "dark".
@@ -29,6 +29,9 @@ _LIGHT = {
     "text": "#1b2430",
     "text_dim": "#5b6672",
     "edge": "#aab2bb",
+    # The accented connector colour for a container's outbound default-route
+    # line (dotted), distinct from the neutral grey membership/forward edges.
+    "route_egress": "#6c79b8",
     "error": "#c0392b",
     "up": "#2e9e4f",
     "down": "#c34a3a",
@@ -51,6 +54,7 @@ _DARK = {
     "text": "#e6e9ee",
     "text_dim": "#9aa4b0",
     "edge": "#525a63",
+    "route_egress": "#7b88cc",
     "error": "#e06a5a",
     "up": "#46c46e",
     "down": "#e06a5a",
@@ -86,10 +90,26 @@ LEGEND_CATEGORIES = [
     ("System DNS", "dns",
      "The host's name resolvers and DNS search domains.", "dns"),
     ("Container", "container",
-     "A Docker container on a bridge network; a dashed line marks published ports.",
+     "A Docker container on a bridge network; its L3 lines are keyed below.",
      "container"),
     ("Loopback", "loopback",
      "The host-internal interface (127.0.0.1 / ::1).", "loopback"),
+]
+
+# Connector (line) styles, keyed for line_pen(); shown in the legend under the
+# box colours so the three kinds of line on the canvas read at a glance. The
+# member line is the bidirectional L2 cable; the other two are a container's
+# L3 lines to a protocol (IP-config) box.
+LEGEND_LINES = [
+    ("Member link (L2)", "member",
+     "A bidirectional layer-2 link: bridge/bond membership, a VLAN's parent, a "
+     "veth pair, or an address attached to its interface."),
+    ("Published ports", "forward",
+     "A container's published ports, DNAT'd inbound to the host address they "
+     "bind to (select a box to read the port list)."),
+    ("Default route (out)", "egress",
+     "A container's always-on outbound path via the host's default route — no "
+     "ports, so no numbers."),
 ]
 
 
@@ -148,6 +168,28 @@ def text_dim() -> QColor:
 
 def edge() -> QColor:
     return QColor(_table()["edge"])
+
+
+def line_pen(kind: str) -> QPen:
+    """The pen for a canvas connector — one source of truth shared by the edges
+    in ``items.py`` and the legend swatches, so a line and its key never drift.
+
+    - ``member``  : solid, neutral grey — a bidirectional L2 link (bridge/bond
+      membership, a VLAN's parent, a veth pair, an address on its interface).
+    - ``forward`` : dashed, neutral grey — a container's published ports, the
+      inbound DNAT to a host address ("only these ports traverse").
+    - ``egress``  : dotted, accented — a container's always-on outbound path via
+      the host's default route (carries no port numbers).
+    """
+    if kind == "forward":
+        pen = QPen(edge(), 1.2)
+        pen.setStyle(Qt.PenStyle.DashLine)
+    elif kind == "egress":
+        pen = QPen(QColor(_table()["route_egress"]), 1.2)
+        pen.setStyle(Qt.PenStyle.DotLine)
+    else:  # member
+        pen = QPen(edge(), 1.4)
+    return pen
 
 
 def error() -> QColor:

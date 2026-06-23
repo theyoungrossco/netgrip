@@ -9,7 +9,7 @@ from PySide6.QtGui import QPainter
 from PySide6.QtWidgets import QApplication, QGraphicsScene, QGraphicsView
 
 from netgrip.core import layout, store
-from netgrip.core.model import HostState
+from netgrip.core.model import HostState, ip_family
 from netgrip.ui import theme
 from netgrip.ui.items import (
     BaseNode,
@@ -20,8 +20,8 @@ from netgrip.ui.items import (
     IpGroup,
     IpNode,
     NicNode,
-    PortEdge,
     RegionNode,
+    RouteEdge,
     SystemDns,
     VlanNode,
     new_draft_id,
@@ -64,6 +64,10 @@ class Canvas(QGraphicsView):
         self._state: HostState | None = None
         self._show_loopback = False
         self._hide_offline = False
+        # A container's L3 lines (RouteEdge), each toggleable from the View menu:
+        # its published-port forwards and its outbound default-route line.
+        self._show_forwards = True
+        self._show_egress = True
         self._host_label: str | None = None  # whose persisted state is loaded
         self._positions: dict[str, QPointF] = {}  # remembered node positions
         # While the auto-layout places boxes, suppress the position saver so its
@@ -114,11 +118,16 @@ class Canvas(QGraphicsView):
     # population & layout
     # ------------------------------------------------------------------ #
     def populate(self, state: HostState | None, show_loopback: bool | None = None,
-                 hide_offline: bool | None = None) -> None:
+                 hide_offline: bool | None = None, show_forwards: bool | None = None,
+                 show_egress: bool | None = None) -> None:
         if show_loopback is not None:
             self._show_loopback = show_loopback
         if hide_offline is not None:
             self._hide_offline = hide_offline
+        if show_forwards is not None:
+            self._show_forwards = show_forwards
+        if show_egress is not None:
+            self._show_egress = show_egress
         self._state = state
         self.setBackgroundBrush(theme.background())  # follow theme changes
         if state is not None and state.label != self._host_label:
@@ -245,16 +254,20 @@ class Canvas(QGraphicsView):
         # Layout-only edges (placement, not drawn): tie each container to the
         # host uplink so a container-bearing docker network flows rightward *from
         # the physical NIC* — uplink → container → bridge → bridge IP — instead of
-        # its bridge floating in column 0. (A container's traffic egresses through
-        # the uplink; its published ports also show as the dashed PortEdges
-        # below.) A docker bridge with NO containers — e.g. an unused docker0 —
-        # carries nothing from the host, so it is deliberately left OUT here and
-        # floats as its own island rather than crowding the uplink's column.
+        # its bridge floating in column 0. We hang containers off the uplink's
+        # IPv4 *protocol box* (the box their RouteEdges actually land on) rather
+        # than the bare NIC, so they sit one column right of it and the dashed/
+        # dotted lines fan out cleanly instead of stacking collinear beneath it;
+        # fall back to the NIC when that group isn't shown. A docker bridge with
+        # NO containers — e.g. an unused docker0 — carries nothing from the host,
+        # so it is left OUT here and floats as its own island.
         uplink = state.uplink()
         uplink_node = if_nodes.get(uplink.name) if uplink else None
+        egress_group = self._group_of(ip_groups, uplink.name, 4) if uplink else None
+        container_anchor = egress_group or uplink_node
         layout_edges = list(graph_edges)
-        if uplink_node is not None:
-            layout_edges += [(uplink_node.key, n.key) for n in container_nodes]
+        if container_anchor is not None:
+            layout_edges += [(container_anchor.key, n.key) for n in container_nodes]
 
         # Physical NICs seed the left column; everything flows rightward from
         # them. The priority order (physical first, loopback last, then by name)
@@ -353,20 +366,39 @@ class Canvas(QGraphicsView):
         for group in ip_groups:
             group.refresh()
 
-        # Published ports as dashed, labelled connectors from each container to
-        # the host's uplink (the default-route link); fall back to a bridge the
-        # container is on when there's no identifiable uplink. Drawn after layout
-        # so they sit on top; the uplink coupling itself is already in the layout.
+        # A container's L3 lines, drawn after layout so they sit on top. Both land
+        # on a protocol (IP-config) box, never the bare NIC — forwarding and the
+        # default route are address-level, and a publish can be pinned to one
+        # host IP. The uplink coupling for placement is already in the layout.
+        #
+        #  - forward (dashed, labelled): each published port resolves to the box
+        #    holding the host address it binds to — the specific address's group
+        #    when pinned, else the uplink's group for its family (0.0.0.0 → v4,
+        #    :: → v6). Ports sharing a box collapse into one labelled line.
+        #  - egress (dotted, no label): the always-on outbound path via the host's
+        #    v4 default route. Suppressed when a forward already links this
+        #    container to that same box, so the two never sit collinear.
         for node in container_nodes:
-            if not node.container.ports:
-                continue
-            anchor = uplink_node or self._first_bridge_node(
-                node.container, bridge_for_net, if_nodes, shown_names
-            )
-            if anchor is None or anchor is node:
-                continue
-            label = ", ".join(p.label() for p in node.container.ports)
-            scene.addItem(PortEdge(node, anchor, label))
+            forwards: dict[str, tuple[RegionNode, list]] = {}
+            if self._show_forwards:
+                for port in node.container.ports:
+                    grp = self._forward_anchor(
+                        port, ip_groups, uplink, node.container,
+                        bridge_for_net, shown_names,
+                    )
+                    if grp is None or grp is node:
+                        continue
+                    forwards.setdefault(grp.key, (grp, []))[1].append(port)
+                for grp, ports in forwards.values():
+                    label = "\n".join(p.label() for p in ports)  # one forward per line
+                    scene.addItem(RouteEdge(node, grp, label, kind="forward"))
+            if self._show_egress:
+                egress = self._egress_anchor(
+                    ip_groups, uplink, node.container, bridge_for_net, shown_names
+                )
+                if egress is not None and egress is not node \
+                        and egress.key not in forwards:
+                    scene.addItem(RouteEdge(node, egress, kind="egress"))
 
         # The DNS frame wraps the finished diagram, so fit it last — after every
         # node (including remembered positions) has settled.
@@ -386,14 +418,61 @@ class Canvas(QGraphicsView):
         self.populate(self._state)
 
     @staticmethod
-    def _first_bridge_node(container, bridge_for_net, if_nodes, shown_names):
-        """The node of the first shown bridge ``container`` is on — the fallback
-        anchor for its published-port connector when there's no host uplink."""
+    def _group_of(ip_groups, iface_name, family):
+        """The IpGroup (protocol box) for one interface + family, or None."""
+        for group in ip_groups:
+            if group.iface.name == iface_name and group.family == family:
+                return group
+        return None
+
+    @classmethod
+    def _first_bridge_group(cls, ip_groups, container, bridge_for_net,
+                            shown_names, family):
+        """The protocol box of the first shown bridge ``container`` is on — the
+        fallback anchor when there's no host uplink (no default route)."""
         for net in container.networks:
             bridge = bridge_for_net.get(net)
             if bridge in shown_names:
-                return if_nodes[bridge]
+                group = cls._group_of(ip_groups, bridge, family)
+                if group is not None:
+                    return group
         return None
+
+    @classmethod
+    def _forward_anchor(cls, port, ip_groups, uplink, container,
+                        bridge_for_net, shown_names):
+        """The protocol box a published port lands on: the group holding the
+        host address it binds to when pinned, else the uplink's group for the
+        publish's family (0.0.0.0 → v4, :: → v6)."""
+        if not port.all_host_ips:
+            family = ip_family(port.host_ip) or 4
+            for group in ip_groups:
+                if any(a.address == port.host_ip
+                       for a in group.iface.addresses_for(family)):
+                    return group
+        else:
+            family = 6 if port.host_ip == "::" else 4
+        if uplink is not None:
+            group = cls._group_of(ip_groups, uplink.name, family)
+            if group is not None:
+                return group
+        return cls._first_bridge_group(
+            ip_groups, container, bridge_for_net, shown_names, family
+        )
+
+    @classmethod
+    def _egress_anchor(cls, ip_groups, uplink, container, bridge_for_net,
+                       shown_names):
+        """The protocol box a container's outbound default route exits through:
+        the uplink's IPv4 group (the default-route family), falling back to a
+        bridge the container is on when there's no host uplink."""
+        if uplink is not None:
+            group = cls._group_of(ip_groups, uplink.name, 4)
+            if group is not None:
+                return group
+        return cls._first_bridge_group(
+            ip_groups, container, bridge_for_net, shown_names, 4
+        )
 
     # ------------------------------------------------------------------ #
     # persisted state (drafts, positions, box names) — see core/store.py

@@ -28,7 +28,7 @@ class BaseNode(QGraphicsObject):
 
     moved = Signal()
     drag_finished = Signal()
-    selected_changed = Signal()  # selection toggled (a PortEdge reveals its label)
+    selected_changed = Signal()  # selection toggled (a RouteEdge reveals its label)
 
     def __init__(self, title: str, lines: list[str], body: QColor, border: QColor,
                  dashed: bool = False):
@@ -304,8 +304,9 @@ class ContainerNode(BaseNode):
     """A Docker container, drawn on the bridge network(s) it joins.
 
     Shows its image, its compose project/service when composed, and its IP on
-    each network. Read-only for now (no menu); published ports are drawn as a
-    dashed :class:`PortEdge` to the host's uplink, not listed here.
+    each network. Read-only for now (no menu); its published ports and outbound
+    route are drawn as :class:`RouteEdge` lines to the protocol boxes, not
+    listed here.
     """
 
     def __init__(self, container: Container):
@@ -789,7 +790,7 @@ class Edge(QGraphicsPathItem):
     def __init__(self, a: BaseNode, b: BaseNode):
         super().__init__()
         self.setZValue(0)
-        self.setPen(QPen(theme.edge(), 1.4))
+        self.setPen(theme.line_pen("member"))
         self._a = a
         self._b = b
         a.moved.connect(self.refresh)
@@ -802,19 +803,27 @@ class Edge(QGraphicsPathItem):
         self.setPath(path)
 
 
-class PortEdge(QGraphicsPathItem):
-    """A dashed line for a container's published ports, from the container to the
-    host's uplink. Dashed so it reads as "only these ports traverse", distinct
-    from the solid membership cables. Its port label is hidden by default (a
-    busy host has many of these) and revealed only while either end box is
-    selected."""
+class RouteEdge(QGraphicsPathItem):
+    """A container's L3 line to a protocol (IP-config) box — never the bare NIC,
+    since both forwarding and the default route are address-level. Two kinds (see
+    ``theme.line_pen``):
 
-    def __init__(self, a: BaseNode, b: BaseNode, label: str):
+    - ``forward``: published ports DNAT'd inbound to the host address they bind
+      to — dashed, and labelled with the port list. The label is hidden by
+      default (a busy host has many of these) and revealed only while either end
+      box is selected.
+    - ``egress``: the always-on outbound path via the host's default route —
+      dotted and accented, and never labelled (it carries no port numbers).
+
+    Both are distinct from the solid membership cables, which are bidirectional
+    L2 links.
+    """
+
+    def __init__(self, a: BaseNode, b: BaseNode, label: str = "",
+                 kind: str = "forward"):
         super().__init__()
         self.setZValue(0)
-        pen = QPen(theme.edge(), 1.2)
-        pen.setStyle(Qt.PenStyle.DashLine)
-        self.setPen(pen)
+        self.setPen(theme.line_pen(kind))
         self._a = a
         self._b = b
         self._label = label
@@ -823,9 +832,12 @@ class PortEdge(QGraphicsPathItem):
         self._font.setPointSizeF(max(7.0, base.pointSizeF() - 1.5))
         a.moved.connect(self.refresh)
         b.moved.connect(self.refresh)
-        # Reveal / hide the label as either end is selected.
-        a.selected_changed.connect(self.update)
-        b.selected_changed.connect(self.update)
+        # Reveal / hide the label as either end is selected. Only BaseNode emits
+        # selected_changed; the protocol-box end is a RegionNode, so guard it —
+        # selecting the container (always a BaseNode) is enough to show the list.
+        for end in (a, b):
+            if hasattr(end, "selected_changed"):
+                end.selected_changed.connect(self.update)
         self.refresh()
 
     def refresh(self) -> None:
@@ -834,26 +846,37 @@ class PortEdge(QGraphicsPathItem):
         self.setPath(path)
 
     def boundingRect(self) -> QRectF:
-        # Room around the line for the midpoint label chip.
-        return super().boundingRect().adjusted(-MAX_TEXT_W / 2, -14, MAX_TEXT_W / 2, 14)
+        # Room around the line for the label chip — one line per published port,
+        # so its height grows with the forward count.
+        fm = QFontMetricsF(self._font)
+        n = self._label.count("\n") + 1 if self._label else 1
+        vpad = max(14.0, n * fm.height() / 2 + 3)
+        return super().boundingRect().adjusted(-MAX_TEXT_W / 2, -vpad, MAX_TEXT_W / 2, vpad)
 
     def paint(self, painter, option, widget=None) -> None:
         super().paint(painter, option, widget)
         # Only label the line while an endpoint is selected — otherwise a host
-        # with many published ports turns into a wall of text.
+        # with many published ports turns into a wall of text. One forward per
+        # line, left-aligned, so a multi-port box reads as a list.
         if not self._label or not (self._a.isSelected() or self._b.isSelected()):
             return
         painter.setFont(self._font)
         fm = QFontMetricsF(self._font)
-        text = fm.elidedText(self._label, Qt.TextElideMode.ElideRight, MAX_TEXT_W)
-        w = fm.horizontalAdvance(text)
-        pos = self._label_anchor(w, fm.height())
-        chip = QRectF(pos.x() - w / 2 - 4, pos.y() - fm.height() / 2 - 1, w + 8, fm.height() + 2)
+        lines = [fm.elidedText(ln, Qt.TextElideMode.ElideRight, MAX_TEXT_W)
+                 for ln in self._label.split("\n")]
+        line_h = fm.height()
+        w = max(fm.horizontalAdvance(ln) for ln in lines)
+        block_h = line_h * len(lines)
+        pos = self._label_anchor(w, block_h)
+        left = pos.x() - w / 2
+        top = pos.y() - block_h / 2
+        chip = QRectF(left - 4, top - 1, w + 8, block_h + 2)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(theme.background())  # blank the line behind the text
         painter.drawRoundedRect(chip, 3, 3)
         painter.setPen(QPen(theme.text_dim()))
-        painter.drawText(QPointF(pos.x() - w / 2, pos.y() + fm.ascent() - fm.height() / 2), text)
+        for i, ln in enumerate(lines):
+            painter.drawText(QPointF(left, top + i * line_h + fm.ascent()), ln)
 
     def _label_anchor(self, w: float, h: float) -> QPointF:
         """A point along the line for the label, biased to the midpoint but

@@ -228,6 +228,18 @@ class MainWindow(QMainWindow):
         self.hide_offline_action.setChecked(QSettings().value("hide_offline", False, type=bool))
         self.hide_offline_action.toggled.connect(self._hide_offline_toggled)
 
+        # A container's two L3 lines, each independently hideable (a busy Docker
+        # host can have many). Both default on; see canvas RouteEdge.
+        self.forwards_action = QAction("Show published ports", self)
+        self.forwards_action.setCheckable(True)
+        self.forwards_action.setChecked(QSettings().value("show_forwards", True, type=bool))
+        self.forwards_action.toggled.connect(self._forwards_toggled)
+
+        self.egress_action = QAction("Show default routes", self)
+        self.egress_action.setCheckable(True)
+        self.egress_action.setChecked(QSettings().value("show_egress", True, type=bool))
+        self.egress_action.toggled.connect(self._egress_toggled)
+
         # The floating colour key (legend.py). Toggling drives its visibility
         # directly — it floats over the canvas, so no repopulate is needed.
         self.legend_action = QAction("Legend", self)
@@ -286,6 +298,9 @@ class MainWindow(QMainWindow):
         view_menu.addAction(self.legend_action)
         view_menu.addAction(self.loopback_action)
         view_menu.addAction(self.hide_offline_action)
+        view_menu.addSeparator()
+        view_menu.addAction(self.forwards_action)
+        view_menu.addAction(self.egress_action)
         view_button.setMenu(view_menu)
         bar.addWidget(view_button)
 
@@ -331,6 +346,14 @@ class MainWindow(QMainWindow):
         QSettings().setValue("hide_offline", checked)
         self._repopulate()
 
+    def _forwards_toggled(self, checked: bool) -> None:
+        QSettings().setValue("show_forwards", checked)
+        self._repopulate()
+
+    def _egress_toggled(self, checked: bool) -> None:
+        QSettings().setValue("show_egress", checked)
+        self._repopulate()
+
     def _legend_toggled(self, checked: bool) -> None:
         QSettings().setValue("legend_visible", checked)
         self.legend.setVisible(checked)
@@ -345,6 +368,8 @@ class MainWindow(QMainWindow):
             self.state,
             self.loopback_action.isChecked(),
             self.hide_offline_action.isChecked(),
+            self.forwards_action.isChecked(),
+            self.egress_action.isChecked(),
         )
 
     def _theme_picked(self, index: int) -> None:
