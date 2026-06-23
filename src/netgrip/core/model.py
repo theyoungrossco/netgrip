@@ -58,6 +58,74 @@ class Gateway:
 
 
 @dataclass
+class PortMapping:
+    """A published container port: a host bind forwarded to a container port.
+
+    Docker DNATs ``host_ip:host_port`` to ``container_port`` (the container's own
+    IP on its network). ``host_ip`` is ``0.0.0.0`` / ``::`` for "every host
+    address" or a specific host IP when the publish was pinned to one.
+    """
+
+    host_ip: str
+    host_port: int
+    container_port: int
+    protocol: str = "tcp"  # tcp | udp
+
+    @property
+    def all_host_ips(self) -> bool:
+        return self.host_ip in ("", "0.0.0.0", "::")
+
+    def label(self) -> str:
+        """Compact `:8080→80/tcp` (host-IP-prefixed when pinned to one)."""
+        host = "" if self.all_host_ips else self.host_ip
+        return f"{host}:{self.host_port}→{self.container_port}/{self.protocol}"
+
+
+@dataclass
+class Container:
+    """A (running) Docker container, as seen from the host.
+
+    ``networks`` maps a docker network name to this container's IP on it (bare,
+    no prefix). ``ports`` are its published host bindings (see PortMapping)."""
+
+    name: str
+    id: str = ""  # short id
+    image: str = ""
+    state: str = "running"
+    compose_project: str = ""  # com.docker.compose.project label ("" if none)
+    compose_service: str = ""  # com.docker.compose.service label
+    networks: dict[str, str] = field(default_factory=dict)
+    ports: list[PortMapping] = field(default_factory=list)
+
+    @property
+    def composed(self) -> bool:
+        return bool(self.compose_project)
+
+    def label(self) -> str:
+        """`project/service` when composed, else the bare container name."""
+        if self.composed:
+            return f"{self.compose_project}/{self.compose_service or self.name}"
+        return self.name
+
+
+@dataclass
+class DockerNetwork:
+    """A docker network and, for the bridge driver, the host bridge backing it.
+
+    ``bridge`` is the Linux bridge ifname (``docker0`` for the default ``bridge``
+    network, ``br-<id12>`` for user networks) — the link that already shows on
+    the canvas, now tied back to its docker network.
+    """
+
+    name: str
+    id: str = ""
+    driver: str = "bridge"
+    bridge: str | None = None
+    subnets: list[str] = field(default_factory=list)
+    gateway: str | None = None
+
+
+@dataclass
 class Interface:
     name: str
     index: int = 0
@@ -85,6 +153,9 @@ class Interface:
     bridge_vlan_aware: bool = False
     pvid: int | None = None
     vlan_tags: list[str] = field(default_factory=list)
+    # The docker network this bridge backs (``docker0`` / ``br-…``), set during
+    # the docker enrichment so the bridge box can say which network it is.
+    docker_network: str | None = None
     # Per-family default route, keyed by family (4 / 6). See `Gateway`.
     gateways: dict[int, Gateway] = field(default_factory=dict)
     # Per-link DNS, as configured on this interface (systemd-resolved). These
@@ -158,6 +229,11 @@ class HostState:
     can_edit_dns: bool = False  # systemd-resolved (resolvectl) present for per-link DNS
     manual_dns: list[str] = field(default_factory=list)  # user-added extras (from store)
     backend: Backend | None = None  # which subsystem owns persistent config (see backends.py)
+    # Docker view (best-effort; empty when docker is absent or unreachable). The
+    # networks tie a bridge Interface back to its docker network; the containers
+    # hang off those networks. See probe_docker / core/model PortMapping.
+    docker_networks: list[DockerNetwork] = field(default_factory=list)
+    containers: list[Container] = field(default_factory=list)
     # (interface, family) pairs the user has switched to DHCP but not yet saved.
     # UI-only intent (set by main_window, redrawn each probe): the family still
     # holds its static address at runtime until Save writes `dhcp` through the
@@ -196,3 +272,33 @@ class HostState:
 
     def link_names(self) -> set[str]:
         return {i.name for i in self.interfaces}
+
+    # -- docker -----------------------------------------------------------
+    def docker_network(self, name: str) -> DockerNetwork | None:
+        return next((n for n in self.docker_networks if n.name == name), None)
+
+    def docker_network_for_bridge(self, ifname: str) -> DockerNetwork | None:
+        """The docker network backed by the given host bridge ifname, if any."""
+        return next((n for n in self.docker_networks if n.bridge == ifname), None)
+
+    def containers_on(self, network: str) -> list[Container]:
+        return [c for c in self.containers if network in c.networks]
+
+    def docker_bridge_names(self) -> set[str]:
+        return {n.bridge for n in self.docker_networks if n.bridge}
+
+    def is_docker_owned(self, iface: Interface) -> bool:
+        """True for a docker-managed link — a docker bridge, or a member of one.
+        NetGrip shows these read-only: altering them (delete, add member, change
+        the gateway address, move an address) breaks docker, so they're edited
+        through docker / compose, not here."""
+        return iface.docker_network is not None or iface.master in self.docker_bridge_names()
+
+    def uplink(self) -> Interface | None:
+        """The interface carrying the IPv4 default route — the host's edge, used
+        to anchor the dashed published-port connectors. None if no default route
+        (or its device isn't in the interface list)."""
+        for iface in self.interfaces:
+            if 4 in iface.gateways:
+                return iface
+        return None

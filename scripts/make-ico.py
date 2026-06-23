@@ -26,7 +26,7 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-SRC_SVG = ROOT / "data" / "icons" / "io.github.theyoungrossco.netgrip.svg"
+SRC_SVG = ROOT / "src" / "netgrip" / "resources" / "io.github.theyoungrossco.netgrip.svg"
 OUT_ICO = ROOT / "data" / "icons" / "netgrip.ico"
 
 # 256 is the largest the ICO directory can describe (a 0 byte means 256); the

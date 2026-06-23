@@ -131,3 +131,22 @@ def test_unknown_edges_are_ignored():
     # An edge to a box that isn't in the set must not raise.
     pos = layout.solve(_boxes(["a"]), [("a", "ghost")], sources=["a"])
     assert set(pos) == {"a"}
+
+
+def test_high_fanout_widens_the_following_gap():
+    from netgrip.core.layout import Box, solve
+
+    # A hub linked to many children should sit further from that column than a
+    # hub linked to one, so the fan of connectors spreads instead of overlapping.
+    def hub_x(n_children):
+        boxes = [Box("hub", 100, 30)] + [Box(f"c{i}", 100, 30) for i in range(n_children)]
+        edges = [("hub", f"c{i}") for i in range(n_children)]
+        pos = solve(boxes, edges, sources=["hub"], priority=["hub"])
+        # x of the children column (all children share a column position).
+        return pos["hub"][0], pos["c0"][0]
+
+    hub1, child1 = hub_x(1)
+    hub8, child8 = hub_x(8)
+    # The children column is pushed further from the hub with more children
+    # (the adaptive fan-out gap), so the connectors spread instead of overlapping.
+    assert (child8 - hub8) > (child1 - hub1)

@@ -32,6 +32,19 @@
   </provides>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.4.0" date="2026-06-23">
+      <description>
+        <p>Docker visibility, read-only. A docker bridge is labelled by its
+        network name, and each running container is drawn as a single box on the
+        networks it joins, showing its image, its IP per network and its compose
+        project/service; the container's host-side veth is folded into that box.
+        Published ports draw as dashed connectors to the host address they bind
+        to, and each container's outbound default route as a dotted line to the
+        uplink, both keyed in the legend and toggleable from the View menu.
+        Read best-effort via docker inspect, so a host without docker is
+        unaffected; docker-owned links are read-only.</p>
+      </description>
+    </release>
     <release version="0.3.0" date="2026-06-21">
       <description>
         <p>Persistence and clarity. Changes can now Save across reboots through

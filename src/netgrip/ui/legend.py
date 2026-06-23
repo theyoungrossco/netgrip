@@ -9,10 +9,29 @@ the single table the Definitions page (workstream E) shares.
 
 from __future__ import annotations
 
-from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QFrame, QGridLayout, QLabel, QMenu
+from PySide6.QtCore import QPointF, Signal
+from PySide6.QtGui import QPainter
+from PySide6.QtWidgets import QFrame, QGridLayout, QLabel, QMenu, QWidget
 
 from netgrip.ui import glyphs, theme
+
+
+class _LineSwatch(QWidget):
+    """A tiny horizontal line in a connector's pen — the legend key for one
+    canvas line style. Reads its pen live from ``theme.line_pen`` on every
+    repaint, so it follows a light/dark switch like the colour swatches do."""
+
+    def __init__(self, kind: str, parent=None):
+        super().__init__(parent)
+        self._kind = kind
+        self.setFixedSize(18, 12)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(theme.line_pen(self._kind))
+        y = self.height() / 2
+        painter.drawLine(QPointF(1, y), QPointF(self.width() - 1, y))
 
 
 class Legend(QFrame):
@@ -28,11 +47,13 @@ class Legend(QFrame):
         self._rows: list[tuple[QLabel, str]] = []  # (swatch, colour key)
         self._labels: list[QLabel] = []
         self._glyphs: list[glyphs.GlyphWidget] = []
+        self._line_swatches: list[_LineSwatch] = []
 
         grid = QGridLayout(self)
         grid.setContentsMargins(11, 9, 13, 9)
         grid.setHorizontalSpacing(9)
         grid.setVerticalSpacing(5)
+        row = 0
         for row, (label, key, _hint, glyph) in enumerate(theme.LEGEND_CATEGORIES):
             swatch = QLabel()
             swatch.setFixedSize(18, 12)
@@ -44,6 +65,19 @@ class Legend(QFrame):
             text = QLabel(label)
             grid.addWidget(text, row, 2)
             self._rows.append((swatch, key))
+            self._labels.append(text)
+
+        # The line-style key sits below the box colours, set off by a rule: the
+        # three kinds of connector the canvas draws (see theme.line_pen).
+        self._separator = QFrame()
+        self._separator.setFrameShape(QFrame.Shape.HLine)
+        grid.addWidget(self._separator, row + 1, 0, 1, 3)
+        for offset, (label, kind, _hint) in enumerate(theme.LEGEND_LINES):
+            swatch = _LineSwatch(kind)
+            grid.addWidget(swatch, row + 2 + offset, 0)
+            text = QLabel(label)
+            grid.addWidget(text, row + 2 + offset, 2)
+            self._line_swatches.append(swatch)
             self._labels.append(text)
 
         self.apply_theme()
@@ -73,3 +107,6 @@ class Legend(QFrame):
             label.setStyleSheet(f"color: {txt}; background: transparent;")
         for glyph in self._glyphs:
             glyph.update()  # re-reads theme.text_dim() on repaint
+        self._separator.setStyleSheet(f"color: {theme.edge().name()};")
+        for swatch in self._line_swatches:
+            swatch.update()  # re-reads theme.line_pen() on repaint

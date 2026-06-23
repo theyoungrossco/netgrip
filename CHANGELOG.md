@@ -6,8 +6,61 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-23
+
+**0.4 — Docker visibility**, a milestone scoped to a single feature: make the
+container layer legible, read-only. The next milestone (0.5, Proxmox /
+vlan-aware bridges) begins from here. See [ROADMAP.md](ROADMAP.md).
+
+### Added
+
+- **Docker visibility** (0.4, read-only): a `docker0` / `br-…` bridge is now
+  labelled with its **docker network** name, and each running **container** is
+  drawn as a **single box** on the bridge network(s) it joins, showing its
+  **image**, its **IP per network** and its **compose project / service**. A
+  container's anonymous host-side `veth` is **folded into that box** rather than
+  drawn beside it. A container's L3 lines now land on a **protocol (IP-config)
+  box**, never the bare NIC, since both forwarding and the default route are
+  address-level: **published ports** draw as a **dashed** connector to the box
+  holding the host address they bind to — the specific address's box when a
+  publish is pinned, else the uplink's box for that family — with ports sharing a
+  box listed **one per line**, each as a `:8080→80/tcp` label (host-IP-prefixed
+  when pinned), revealed when either end is **selected**. Every container also
+  shows its always-on **outbound default route** as a distinct **dotted**,
+  accented line to the uplink's IPv4 box (no ports, so no numbers), suppressed
+  where a published-port line already reaches that same box. Both line kinds are
+  independently hideable from the **View** menu (*Show published ports* / *Show
+  default routes*), and the **legend** now keys all three connector styles
+  (solid member link, dashed ports, dotted default route). Read best-effort via
+  `docker network inspect` / `docker inspect`, so
+  a host without docker — or without daemon access — is unaffected. Docker-owned
+  links are **read-only** (a docker bridge and its members): netgrip refuses to
+  rename, delete, re-address, add members to or move addresses off them, since
+  that would break docker — edit those through docker / compose. A docker bridge
+  is now titled by its **network name** (its alias if set, else the docker
+  network, else the `br-…` ifname kept as a detail line), and the whole docker
+  subgraph lays out **left-to-right from the host's uplink** (uplink → IPv4 box →
+  containers → bridge), never with a bridge stuck in the left column. See
+  [docs/0.4-PLAN.md](docs/0.4-PLAN.md).
+
+### Fixed
+
+- A container `veth` no longer mis-reports its peer as a host interface (e.g.
+  `eth0`): the peer resolver now respects network namespaces, so a cross-netns
+  ifindex that happens to collide with a host interface's is left unpaired.
+- **The window now shows the NetGrip monogram, not a generic network glyph.**
+  The icon is bundled inside the package (`netgrip/resources/`) and set on the
+  application, so it appears however netgrip is launched — including straight
+  from the venv's `bin/netgrip` with no desktop integration installed — instead
+  of the previous hardcoded freedesktop `network-wired` fallback. That same SVG
+  is now the single source the Linux installer and the Windows `.ico` generator
+  read from.
+
 ### Changed
 
+- **Canvas layout spaces out fan-outs**: when a box connects to several boxes in
+  the next column, the gap after its column widens so the connector lines spread
+  rather than overlap into one another.
 - **New app icon** — an "N" monogram with four coloured nodes — replacing the
   previous mark across the README, the Linux desktop/scalable icon, the Windows
   `.ico` (executable, shortcut and installer), and the GitHub social preview.
@@ -116,6 +169,7 @@ First release.
   invalid input is reported inline (no stacked dialogs)
 - Demo mode (`netgrip --demo`)
 
-[Unreleased]: https://github.com/theyoungrossco/netgrip/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/theyoungrossco/netgrip/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/theyoungrossco/netgrip/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/theyoungrossco/netgrip/compare/v0.1.0...v0.3.0
 [0.1.0]: https://github.com/theyoungrossco/netgrip/releases/tag/v0.1.0

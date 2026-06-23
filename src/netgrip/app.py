@@ -51,6 +51,9 @@ def main(argv: list[str] | None = None) -> int:
     app.setApplicationDisplayName("NetGrip")
     app.setDesktopFileName("io.github.theyoungrossco.netgrip")
 
+    from netgrip.ui.branding import app_icon
+    app.setWindowIcon(app_icon())
+
     # Match the desktop's light/dark theme (or the user's saved override).
     from netgrip.ui import theme
     pref = QSettings().value("theme", "system")

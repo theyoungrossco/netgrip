@@ -124,7 +124,7 @@ fi
 # ----------------------------------------------------------------------------- desktop files
 echo "Adding NetGrip to the application menu..."
 mkdir -p "$APP_DIR" "$ICON_DIR" "$META_DIR"
-install -m 0644 "$REPO/data/icons/$APP_ID.svg" "$ICON_FILE"
+install -m 0644 "$REPO/src/netgrip/resources/$APP_ID.svg" "$ICON_FILE"
 install -m 0644 "$REPO/data/$APP_ID.metainfo.xml" "$META_FILE"
 
 # Point Exec at the absolute binary: desktop launchers don't always inherit the

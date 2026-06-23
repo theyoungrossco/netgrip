@@ -75,6 +75,11 @@ _BODIES: dict[str, str] = {
         '<path d="M5.2 17a16 16 0 0 1 13.6 0"/>'
         '<path d="M12 2.5a4.6 9.5 0 0 0 0 19 4.6 9.5 0 0 0 0-19"/>'
     ),
+    # A shipping container: a box with vertical ribs — the docker mark.
+    "container": (
+        '<rect x="3.5" y="6.5" width="17" height="11" rx="1"/>'
+        '<path d="M8 6.5v11M12 6.5v11M16 6.5v11"/>'
+    ),
     # A circular return arrow: traffic that loops back to the host itself.
     "loopback": (
         '<path d="M20.5 12a8.5 8.5 0 1 1-8.5-8.5c2.4 0 4.66.95 6.36 2.6L20.5 8"/>'

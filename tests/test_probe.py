@@ -4,18 +4,24 @@ import os
 import shutil
 import subprocess
 
-from netgrip.core.model import Gateway
+from netgrip.core.model import Gateway, Interface
 from netgrip.core.probe import (
     _LINKDNS,
     _LINKDOMAIN,
     DNS_COMMAND,
+    DOCKER_NETWORK_COMMAND,
+    apply_docker,
     parse_addr_json,
     parse_bridge_vlan_json,
+    parse_docker_containers,
+    parse_docker_networks,
+    parse_port_bindings,
     parse_resolv_conf,
     parse_resolvectl_links,
     parse_route_json,
     parse_wireless,
     probe_dns,
+    probe_docker,
 )
 
 # Trimmed but structurally faithful iproute2 JSON for: loopback, a physical
@@ -85,10 +91,11 @@ FIXTURE = [
         "operstate": "UP", "link_type": "ether", "address": "52:54:00:77:88:02",
         "linkinfo": {"info_kind": "veth"}, "addr_info": [],
     },
-    # A veth whose peer lives in another namespace (a container): only an
-    # ifindex we can't resolve locally, so it is left unpaired.
+    # A veth whose peer lives in another namespace (a container): the peer
+    # ifindex is given with a link_netnsid, and here it deliberately collides
+    # with eth0's ifindex (2) — the resolver must NOT mis-pair it to eth0.
     {
-        "ifindex": 8, "ifname": "vethC", "link_index": 4242,
+        "ifindex": 8, "ifname": "vethC", "link_index": 2, "link_netnsid": 0,
         "flags": ["BROADCAST", "MULTICAST", "UP", "LOWER_UP"], "mtu": 1500,
         "operstate": "UP", "link_type": "ether", "address": "52:54:00:77:88:03",
         "linkinfo": {"info_kind": "veth"}, "addr_info": [],
@@ -141,10 +148,13 @@ def test_veth_peers_resolve_both_ends():
 
 
 def test_veth_peer_in_other_namespace_is_unpaired():
-    # The container case: the far end isn't a local interface, so no peer.
-    vethc = {i.name: i for i in parse_addr_json(FIXTURE)}["vethC"]
+    # The container case: the far end is in another netns (link_netnsid set), so
+    # its ifindex must not resolve — even though it collides with eth0's (2).
+    ifaces = {i.name: i for i in parse_addr_json(FIXTURE)}
+    vethc = ifaces["vethC"]
     assert vethc.kind == "veth"
     assert vethc.peer is None
+    assert ifaces["eth0"].index == 2  # the index vethC's peer collides with
 
 
 def test_bond_and_member():
@@ -291,3 +301,144 @@ def test_dns_command_exits_zero_without_resolvectl(tmp_path):
     assert proc.returncode == 0
     assert _LINKDNS in proc.stdout
     assert _LINKDOMAIN in proc.stdout
+
+
+# Trimmed but structurally faithful `docker network inspect` output: the default
+# bridge network (host bridge from the option) and a user network (no option, so
+# the bridge defaults to br-<id12>).
+DOCKER_NETWORKS = [
+    {
+        "Name": "bridge",
+        "Id": "0123456789abcdef0000",
+        "Driver": "bridge",
+        "Options": {"com.docker.network.bridge.name": "docker0"},
+        "IPAM": {"Config": [{"Subnet": "172.17.0.0/16", "Gateway": "172.17.0.1"}]},
+    },
+    {
+        "Name": "web",
+        "Id": "abc123def4567890aaaa",
+        "Driver": "bridge",
+        "Options": {},
+        "IPAM": {"Config": [{"Subnet": "172.18.0.0/16", "Gateway": "172.18.0.1"}]},
+    },
+    {"Name": "hostnet", "Id": "ff00", "Driver": "host", "Options": {}, "IPAM": {}},
+]
+
+# Trimmed `docker inspect <containers>`: a composed web container publishing two
+# ports (v4+v6 on one of them), and an un-composed container with no ports.
+DOCKER_CONTAINERS = [
+    {
+        "Id": "b2c3d4e5f6a7b8c9d0e1",
+        "Name": "/shop-web-1",
+        "Config": {
+            "Image": "nginx:1.27",
+            "Labels": {
+                "com.docker.compose.project": "shop",
+                "com.docker.compose.service": "web",
+            },
+        },
+        "State": {"Status": "running"},
+        "NetworkSettings": {
+            "Ports": {
+                "80/tcp": [
+                    {"HostIp": "0.0.0.0", "HostPort": "8080"},
+                    {"HostIp": "::", "HostPort": "8080"},
+                ],
+                "443/tcp": [{"HostIp": "192.168.1.10", "HostPort": "8443"}],
+                "9000/tcp": None,  # exposed but not published
+            },
+            "Networks": {"web": {"IPAddress": "172.18.0.2", "NetworkID": "abc"}},
+        },
+    },
+    {
+        "Id": "c3d4e5f6a7b8c9d0e1f2",
+        "Name": "/registry",
+        "Config": {"Image": "registry:2", "Labels": {}},
+        "State": {"Status": "running"},
+        "NetworkSettings": {
+            "Ports": {},
+            "Networks": {"bridge": {"IPAddress": "172.17.0.2"}},
+        },
+    },
+]
+
+
+def test_parse_docker_networks_bridge_names_and_subnets():
+    networks = parse_docker_networks(DOCKER_NETWORKS)
+    by_name = {n.name: n for n in networks}
+    # Default bridge takes its host bridge from the option.
+    assert by_name["bridge"].bridge == "docker0"
+    assert by_name["bridge"].subnets == ["172.17.0.0/16"]
+    assert by_name["bridge"].gateway == "172.17.0.1"
+    # A user network with no option defaults to br-<id12>.
+    assert by_name["web"].bridge == "br-abc123def456"
+    # A non-bridge driver carries no host bridge.
+    assert by_name["hostnet"].driver == "host"
+    assert by_name["hostnet"].bridge is None
+
+
+def test_parse_docker_containers_labels_ip_and_ports():
+    containers = parse_docker_containers(DOCKER_CONTAINERS)
+    web = containers[0]
+    assert web.name == "shop-web-1"  # leading slash stripped
+    assert web.id == "b2c3d4e5f6a7"  # truncated to 12
+    assert web.image == "nginx:1.27"
+    assert web.composed and web.compose_project == "shop"
+    assert web.label() == "shop/web"
+    assert web.networks == {"web": "172.18.0.2"}
+    # v4+v6 on the same publish collapse to one all-addresses mapping; the
+    # pinned :443 keeps its host IP; the unpublished 9000 is dropped.
+    labels = [p.label() for p in web.ports]
+    assert labels == [":8080→80/tcp", "192.168.1.10:8443→443/tcp"]
+
+    registry = containers[1]
+    assert not registry.composed
+    assert registry.label() == "registry"
+    assert registry.ports == []
+
+
+def test_parse_port_bindings_dedupe_and_null():
+    ports = {
+        "53/udp": [{"HostIp": "0.0.0.0", "HostPort": "53"}],
+        "80/tcp": None,
+        "garbage": [{"HostIp": "0.0.0.0", "HostPort": "1"}],
+    }
+    mappings = parse_port_bindings(ports)
+    assert len(mappings) == 1
+    assert mappings[0].protocol == "udp"
+    assert mappings[0].container_port == 53
+    assert mappings[0].all_host_ips
+
+
+def test_apply_docker_tags_bridge_interface():
+    interfaces = [Interface(name="docker0", kind="bridge"),
+                  Interface(name="eth0", kind="physical")]
+    apply_docker(interfaces, parse_docker_networks(DOCKER_NETWORKS))
+    assert interfaces[0].docker_network == "bridge"
+    assert interfaces[1].docker_network is None
+
+
+class _DockerRunner:
+    """Returns the networks JSON for the network read, containers for the other."""
+
+    def run(self, argv):
+        import json
+        if argv == DOCKER_NETWORK_COMMAND:
+            return json.dumps(DOCKER_NETWORKS)
+        return json.dumps(DOCKER_CONTAINERS)
+
+
+class _NoDockerRunner:
+    def run(self, argv):
+        raise RuntimeError("docker: command not found")
+
+
+def test_probe_docker_reads_both():
+    networks, containers = probe_docker(_DockerRunner())
+    assert {n.name for n in networks} == {"bridge", "web", "hostnet"}
+    assert {c.name for c in containers} == {"shop-web-1", "registry"}
+
+
+def test_probe_docker_best_effort_when_absent():
+    # No docker (or no daemon access): yields nothing, never raises.
+    assert probe_docker(_NoDockerRunner()) == ([], [])

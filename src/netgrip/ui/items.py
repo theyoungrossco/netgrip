@@ -11,7 +11,7 @@ from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainterPath, QPen
 from PySide6.QtWidgets import QApplication, QGraphicsItem, QGraphicsObject, QGraphicsPathItem
 
 from netgrip.core.actions import BOND_MODES
-from netgrip.core.model import Address, Interface
+from netgrip.core.model import Address, Container, Interface
 from netgrip.ui import glyphs, theme
 
 PAD = 9.0
@@ -28,6 +28,7 @@ class BaseNode(QGraphicsObject):
 
     moved = Signal()
     drag_finished = Signal()
+    selected_changed = Signal()  # selection toggled (a RouteEdge reveals its label)
 
     def __init__(self, title: str, lines: list[str], body: QColor, border: QColor,
                  dashed: bool = False):
@@ -120,6 +121,8 @@ class BaseNode(QGraphicsObject):
     def itemChange(self, change, value):
         if change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged:
             self.moved.emit()
+        elif change == QGraphicsItem.GraphicsItemChange.ItemSelectedHasChanged:
+            self.selected_changed.emit()
         return super().itemChange(change, value)
 
     def mousePressEvent(self, event) -> None:
@@ -225,16 +228,32 @@ class GroupNode(BaseNode):
 
     def __init__(self, iface: Interface, member_count: int):
         lines = []
-        if iface.alias:
-            lines.append(iface.alias)
+        # A bridge's title prefers a human label: its alias, else its docker
+        # network name, else the bare (often random) br-… ifname — so a docker
+        # bridge reads as "mc-docker_default", not "br-3926f46f7329", with the
+        # ifname kept as a detail line. Bonds/teams keep the ifname as the title.
+        if iface.kind == "bridge":
+            title = iface.alias or iface.docker_network or iface.name
+        else:
+            title = iface.name
+            if iface.alias:
+                lines.append(iface.alias)
         if iface.kind == "bond":
             lines.append(BOND_MODES.get(iface.bond_mode or "", iface.bond_mode or "bond"))
+        elif iface.docker_network:
+            # The docker network is the title when there's no alias; name it
+            # here only when the alias took the title.
+            if title != iface.docker_network:
+                lines.append(f"docker: {iface.docker_network}")
+            lines.append("docker bridge")
         else:
             lines.append(iface.kind)
         if iface.kind == "bridge" and iface.bridge_vlan_aware:
             lines.append("vlan-aware")
+        if title != iface.name:
+            lines.append(iface.name)  # the real br-… ifname, last
         body, border = theme.node("group")
-        super().__init__(iface.name, lines, body, border)
+        super().__init__(title, lines, body, border)
         self.iface = iface
         self.key = f"if:{iface.name}"
 
@@ -279,6 +298,34 @@ class DraftVlanNode(BaseNode):
     def _paint_extra(self, painter) -> None:
         # No status dot (it doesn't exist yet); the tag glyph hugs the corner.
         self._paint_corner_glyph(painter, "vlan", beside_dot=False)
+
+
+class ContainerNode(BaseNode):
+    """A Docker container, drawn on the bridge network(s) it joins.
+
+    Shows its image, its compose project/service when composed, and its IP on
+    each network. Read-only for now (no menu); its published ports and outbound
+    route are drawn as :class:`RouteEdge` lines to the protocol boxes, not
+    listed here.
+    """
+
+    def __init__(self, container: Container):
+        self.container = container
+        lines: list[str] = []
+        if container.image:
+            lines.append(container.image)
+        if container.composed:
+            lines.append(f"compose: {container.compose_project}/"
+                         f"{container.compose_service or '?'}")
+        for net, ip in container.networks.items():
+            lines.append(f"{net}  {ip}")
+        body, border = theme.node("container")
+        super().__init__(container.name, lines, body, border)
+        self.key = f"container:{container.id or container.name}"
+
+    def _paint_extra(self, painter) -> None:
+        self._paint_status_dot(painter, self.container.state == "running")
+        self._paint_corner_glyph(painter, "container")
 
 
 def ip_key(parent_name: str, cidr: str) -> str:
@@ -743,7 +790,7 @@ class Edge(QGraphicsPathItem):
     def __init__(self, a: BaseNode, b: BaseNode):
         super().__init__()
         self.setZValue(0)
-        self.setPen(QPen(theme.edge(), 1.4))
+        self.setPen(theme.line_pen("member"))
         self._a = a
         self._b = b
         a.moved.connect(self.refresh)
@@ -754,3 +801,98 @@ class Edge(QGraphicsPathItem):
         path = QPainterPath(self._a.anchor())
         path.lineTo(self._b.anchor())
         self.setPath(path)
+
+
+class RouteEdge(QGraphicsPathItem):
+    """A container's L3 line to a protocol (IP-config) box — never the bare NIC,
+    since both forwarding and the default route are address-level. Two kinds (see
+    ``theme.line_pen``):
+
+    - ``forward``: published ports DNAT'd inbound to the host address they bind
+      to — dashed, and labelled with the port list. The label is hidden by
+      default (a busy host has many of these) and revealed only while either end
+      box is selected.
+    - ``egress``: the always-on outbound path via the host's default route —
+      dotted and accented, and never labelled (it carries no port numbers).
+
+    Both are distinct from the solid membership cables, which are bidirectional
+    L2 links.
+    """
+
+    def __init__(self, a: BaseNode, b: BaseNode, label: str = "",
+                 kind: str = "forward"):
+        super().__init__()
+        self.setZValue(0)
+        self.setPen(theme.line_pen(kind))
+        self._a = a
+        self._b = b
+        self._label = label
+        base = QApplication.font()
+        self._font = QFont(base)
+        self._font.setPointSizeF(max(7.0, base.pointSizeF() - 1.5))
+        a.moved.connect(self.refresh)
+        b.moved.connect(self.refresh)
+        # Reveal / hide the label as either end is selected. Only BaseNode emits
+        # selected_changed; the protocol-box end is a RegionNode, so guard it —
+        # selecting the container (always a BaseNode) is enough to show the list.
+        for end in (a, b):
+            if hasattr(end, "selected_changed"):
+                end.selected_changed.connect(self.update)
+        self.refresh()
+
+    def refresh(self) -> None:
+        path = QPainterPath(self._a.anchor())
+        path.lineTo(self._b.anchor())
+        self.setPath(path)
+
+    def boundingRect(self) -> QRectF:
+        # Room around the line for the label chip — one line per published port,
+        # so its height grows with the forward count.
+        fm = QFontMetricsF(self._font)
+        n = self._label.count("\n") + 1 if self._label else 1
+        vpad = max(14.0, n * fm.height() / 2 + 3)
+        return super().boundingRect().adjusted(-MAX_TEXT_W / 2, -vpad, MAX_TEXT_W / 2, vpad)
+
+    def paint(self, painter, option, widget=None) -> None:
+        super().paint(painter, option, widget)
+        # Only label the line while an endpoint is selected — otherwise a host
+        # with many published ports turns into a wall of text. One forward per
+        # line, left-aligned, so a multi-port box reads as a list.
+        if not self._label or not (self._a.isSelected() or self._b.isSelected()):
+            return
+        painter.setFont(self._font)
+        fm = QFontMetricsF(self._font)
+        lines = [fm.elidedText(ln, Qt.TextElideMode.ElideRight, MAX_TEXT_W)
+                 for ln in self._label.split("\n")]
+        line_h = fm.height()
+        w = max(fm.horizontalAdvance(ln) for ln in lines)
+        block_h = line_h * len(lines)
+        pos = self._label_anchor(w, block_h)
+        left = pos.x() - w / 2
+        top = pos.y() - block_h / 2
+        chip = QRectF(left - 4, top - 1, w + 8, block_h + 2)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(theme.background())  # blank the line behind the text
+        painter.drawRoundedRect(chip, 3, 3)
+        painter.setPen(QPen(theme.text_dim()))
+        for i, ln in enumerate(lines):
+            painter.drawText(QPointF(left, top + i * line_h + fm.ascent()), ln)
+
+    def _label_anchor(self, w: float, h: float) -> QPointF:
+        """A point along the line for the label, biased to the midpoint but
+        nudged toward the ends to dodge any box it would otherwise sit on top
+        of. Falls back to the midpoint if every candidate collides."""
+        a, b = self._a.anchor(), self._b.anchor()
+        scene = self.scene()
+        boxes = []
+        if scene is not None:
+            boxes = [
+                it.sceneBoundingRect() for it in scene.items()
+                if isinstance(it, (BaseNode, RegionNode)) and it not in (self._a, self._b)
+            ]
+        for frac in (0.5, 0.42, 0.58, 0.34, 0.66, 0.26, 0.74):
+            pos = a * (1 - frac) + b * frac
+            chip = QRectF(pos.x() - w / 2 - 4, pos.y() - h / 2 - 1, w + 8, h + 2)
+            if not any(chip.intersects(box) for box in boxes):
+                return pos
+        return (a + b) / 2

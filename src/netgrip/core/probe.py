@@ -5,7 +5,14 @@ from __future__ import annotations
 import json
 import re
 
-from netgrip.core.model import Address, Gateway, Interface
+from netgrip.core.model import (
+    Address,
+    Container,
+    DockerNetwork,
+    Gateway,
+    Interface,
+    PortMapping,
+)
 from netgrip.core.runner import Runner
 
 PROBE_COMMAND = ["ip", "-details", "-json", "address", "show"]
@@ -49,6 +56,28 @@ DNS_COMMAND = [
 
 # `resolvectl dns` / `domain` print one line per link: "Link 2 (eth0): a b c".
 _RESOLVECTL_LINK_RE = re.compile(r"^Link\s+\d+\s+\(([^)]+)\):\s*(.*)$")
+
+# Docker, read best-effort and unprivileged. `network ls -q` feeds the bridge
+# names / subnets read; `ps -q | xargs docker inspect` reads each running
+# container (image, compose labels, per-network IP, published ports). Both pipe
+# through `sh -c` like the DNS read; if docker is missing or the daemon is
+# unreachable the command errors and the caller falls back to "no docker" — it
+# never fails the rest of the probe. `xargs -r` skips the inspect when there are
+# no running containers (an empty `docker inspect` would otherwise error).
+DOCKER_NETWORK_COMMAND = [
+    "sh", "-c", "docker network inspect $(docker network ls -q) 2>/dev/null",
+]
+DOCKER_CONTAINER_COMMAND = [
+    "sh", "-c", "docker ps -q | xargs -r docker inspect 2>/dev/null",
+]
+
+# Docker labels carrying the compose project / service of a container.
+_COMPOSE_PROJECT = "com.docker.compose.project"
+_COMPOSE_SERVICE = "com.docker.compose.service"
+# Option naming the host bridge of a docker bridge network (e.g. "docker0").
+_BRIDGE_NAME_OPT = "com.docker.network.bridge.name"
+# A published port key, "80/tcp" or just "80" (proto defaults to tcp).
+_PORT_KEY_RE = re.compile(r"^(\d+)(?:/(\w+))?$")
 
 # Routing protocols that mean "the kernel/DHCP/RA put this here", not the user.
 _DYNAMIC_PROTOCOLS = {"dhcp", "ra", "redirect", "kernel"}
@@ -194,6 +223,135 @@ def parse_bridge_vlan_json(payload: list[dict]) -> dict[str, tuple[int | None, l
     return table
 
 
+def probe_docker(runner: Runner) -> tuple[list[DockerNetwork], list[Container]]:
+    """Read the host's docker networks and running containers.
+
+    Best-effort and unprivileged: a host without docker (or where the user can't
+    reach the daemon) yields ``([], [])`` and never raises, so docker visibility
+    is a pure bonus on top of the iproute2 probe.
+    """
+    networks = _run_docker_json(runner, DOCKER_NETWORK_COMMAND, parse_docker_networks)
+    containers = _run_docker_json(runner, DOCKER_CONTAINER_COMMAND, parse_docker_containers)
+    return networks, containers
+
+
+def _run_docker_json(runner: Runner, command: list[str], parse):
+    try:
+        payload = json.loads(runner.run(command))
+    except (RuntimeError, ValueError):
+        return []
+    if not isinstance(payload, list):
+        return []
+    return parse(payload)
+
+
+def apply_docker(interfaces: list[Interface], networks: list[DockerNetwork]) -> None:
+    """Tag each bridge Interface with the docker network it backs, so its box can
+    name the network (the bridge already shows from the iproute2 probe)."""
+    by_name = {i.name: i for i in interfaces}
+    for net in networks:
+        iface = by_name.get(net.bridge or "")
+        if iface is not None:
+            iface.docker_network = net.name
+
+
+def parse_docker_networks(payload: list[dict]) -> list[DockerNetwork]:
+    """Parse `docker network inspect` output into :class:`DockerNetwork`s.
+
+    The host bridge ifname comes from the bridge-name option; a user bridge
+    network that didn't set one defaults to ``br-<id12>``, the default ``bridge``
+    network to ``docker0``. Non-bridge drivers (host/overlay/macvlan/null) carry
+    no host bridge and just record their name and driver.
+    """
+    networks: list[DockerNetwork] = []
+    for entry in payload:
+        name = entry.get("Name")
+        if not name:
+            continue
+        nid = entry.get("Id") or ""
+        driver = entry.get("Driver") or "bridge"
+        options = entry.get("Options") or {}
+        bridge = options.get(_BRIDGE_NAME_OPT)
+        if not bridge and driver == "bridge":
+            bridge = "docker0" if name == "bridge" else f"br-{nid[:12]}"
+        subnets: list[str] = []
+        gateway: str | None = None
+        for cfg in (entry.get("IPAM") or {}).get("Config") or []:
+            if cfg.get("Subnet"):
+                subnets.append(cfg["Subnet"])
+            if cfg.get("Gateway") and gateway is None:
+                gateway = cfg["Gateway"]
+        networks.append(DockerNetwork(
+            name=name, id=nid, driver=driver,
+            bridge=bridge if driver == "bridge" else None,
+            subnets=subnets, gateway=gateway,
+        ))
+    return networks
+
+
+def parse_docker_containers(payload: list[dict]) -> list[Container]:
+    """Parse `docker inspect <containers>` output into :class:`Container`s."""
+    containers: list[Container] = []
+    for entry in payload:
+        name = (entry.get("Name") or "").lstrip("/")
+        if not name:
+            continue
+        config = entry.get("Config") or {}
+        labels = config.get("Labels") or {}
+        netsettings = entry.get("NetworkSettings") or {}
+        networks = {
+            net: data.get("IPAddress", "")
+            for net, data in (netsettings.get("Networks") or {}).items()
+            if isinstance(data, dict)
+        }
+        containers.append(Container(
+            name=name,
+            id=(entry.get("Id") or "")[:12],
+            image=config.get("Image") or "",
+            state=(entry.get("State") or {}).get("Status") or "running",
+            compose_project=labels.get(_COMPOSE_PROJECT, ""),
+            compose_service=labels.get(_COMPOSE_SERVICE, ""),
+            networks={k: v for k, v in networks.items() if v},
+            ports=parse_port_bindings(netsettings.get("Ports") or {}),
+        ))
+    return containers
+
+
+def parse_port_bindings(ports: dict) -> list[PortMapping]:
+    """Parse a container's `.NetworkSettings.Ports` into :class:`PortMapping`s.
+
+    The map is ``{"80/tcp": [{"HostIp": "0.0.0.0", "HostPort": "8080"}], ...}``;
+    a ``null`` value means the port is exposed but not published, and is skipped.
+    Bindings that differ only by an all-addresses host IP (the ``0.0.0.0`` and
+    ``::`` pair Docker emits for one publish) collapse to a single mapping.
+    """
+    mappings: list[PortMapping] = []
+    seen: set[tuple[str, int, int, str]] = set()
+    for key, bindings in ports.items():
+        if not bindings:
+            continue
+        match = _PORT_KEY_RE.match(key)
+        if not match:
+            continue
+        container_port = int(match.group(1))
+        protocol = match.group(2) or "tcp"
+        for binding in bindings:
+            host_ip = binding.get("HostIp") or ""
+            try:
+                host_port = int(binding.get("HostPort") or 0)
+            except (TypeError, ValueError):
+                continue
+            if not host_port:
+                continue
+            norm_ip = "" if host_ip in ("", "0.0.0.0", "::") else host_ip
+            dedupe = (norm_ip, host_port, container_port, protocol)
+            if dedupe in seen:
+                continue
+            seen.add(dedupe)
+            mappings.append(PortMapping(host_ip, host_port, container_port, protocol))
+    return mappings
+
+
 def parse_route_json(payload: list[dict]) -> dict[str, Gateway]:
     """Map dev -> default `Gateway` from one family's `ip -json route show`."""
     gateways: dict[str, Gateway] = {}
@@ -242,9 +400,13 @@ def parse_addr_json(payload: list[dict]) -> list[Interface]:
     interfaces: list[Interface] = []
     # A veth's other end comes from IFLA_LINK: iproute2 reports it as a name
     # ("link") when the peer is in this namespace, or only as an ifindex
-    # ("link_index") when it lives in another (e.g. a container). Stash both
-    # and resolve to a name once every link has been read.
-    veth_peers: dict[str, tuple[str | None, int | None]] = {}
+    # ("link_index") when it lives in another (e.g. a container). A peer in
+    # another namespace also carries "link_netnsid"; its ifindex is meaningful
+    # only in *that* namespace, so it must never be matched against our own
+    # ifindexes (a container's eth0 ifindex routinely collides with a host
+    # interface's, which would mis-pair every container veth to, say, eth0).
+    # Stash all three and resolve once every link has been read.
+    veth_peers: dict[str, tuple[str | None, int | None, int | None]] = {}
     for item in payload:
         linkinfo = item.get("linkinfo") or {}
         info_data = linkinfo.get("info_data") or {}
@@ -269,7 +431,9 @@ def parse_addr_json(payload: list[dict]) -> list[Interface]:
             bridge_vlan_aware=bool(info_data.get("vlan_filtering")) if kind == "bridge" else False,
         )
         if kind == "veth":
-            veth_peers[iface.name] = (item.get("link"), item.get("link_index"))
+            veth_peers[iface.name] = (
+                item.get("link"), item.get("link_index"), item.get("link_netnsid")
+            )
 
         for ai in item.get("addr_info", []):
             family = 4 if ai.get("family") == "inet" else 6
@@ -291,15 +455,18 @@ def parse_addr_json(payload: list[dict]) -> list[Interface]:
         interfaces.append(iface)
 
     # Resolve veth peers now that every interface is known. Prefer the name the
-    # kernel gave us; otherwise map the peer ifindex to a local interface. A
-    # peer in another namespace resolves to neither and is left unpaired.
+    # kernel gave us; otherwise map the peer ifindex to a local interface, but
+    # only when the peer is in *our* namespace (no link_netnsid) — a cross-netns
+    # ifindex would otherwise mis-pair a container's veth to a host interface. A
+    # peer in another namespace (a container) resolves to neither and stays
+    # unpaired; its docker container, not the bare veth, is what we draw.
     by_index = {i.index: i for i in interfaces}
     names = {i.name for i in interfaces}
     for iface in interfaces:
-        link_name, link_index = veth_peers.get(iface.name, (None, None))
+        link_name, link_index, netnsid = veth_peers.get(iface.name, (None, None, None))
         if link_name in names:
             iface.peer = link_name
-        elif link_index in by_index:
+        elif netnsid is None and link_index in by_index:
             iface.peer = by_index[link_index].name
     return interfaces
 
