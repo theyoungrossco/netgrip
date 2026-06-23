@@ -242,6 +242,25 @@ class Canvas(QGraphicsView):
             graph_edges.append((if_nodes[group.iface.name].key, group.key))
         graph_edges.extend(container_edges)
 
+        # Layout-only edges (placement, not drawn): tie the docker subgraph to
+        # the host uplink so it flows rightward *from the physical NIC* instead
+        # of floating with its bridge stuck in column 0. Containers hang off the
+        # uplink (their traffic egresses through it; their published ports show
+        # as the dashed PortEdges below), which puts the uplink at column 0, the
+        # containers next, then their bridges — never a bridge on the left. A
+        # container-less docker bridge attaches directly so it flows right too.
+        uplink = state.uplink()
+        uplink_node = if_nodes.get(uplink.name) if uplink else None
+        layout_edges = list(graph_edges)
+        if uplink_node is not None:
+            bridges_with_containers = {a for a, _ in container_edges}
+            layout_edges += [(uplink_node.key, n.key) for n in container_nodes]
+            layout_edges += [
+                (uplink_node.key, if_nodes[n.bridge].key)
+                for n in state.docker_networks
+                if n.bridge in shown_names and if_nodes[n.bridge].key not in bridges_with_containers
+            ]
+
         # Physical NICs seed the left column; everything flows rightward from
         # them. The priority order (physical first, loopback last, then by name)
         # breaks layout ties and orders the vertically-stacked components. An
@@ -304,7 +323,7 @@ class Canvas(QGraphicsView):
             for n in container_nodes
         ]
         placement = layout.solve(
-            boxes, graph_edges, sources, priority,
+            boxes, layout_edges, sources, priority,
             margin_x=MARGIN, margin_y=start_y, col_gap=COL_GAP, row_gap=V_GAP,
         )
         # The saver is muted for the whole placement pass (see _laying_out), so
@@ -342,9 +361,7 @@ class Canvas(QGraphicsView):
         # Published ports as dashed, labelled connectors from each container to
         # the host's uplink (the default-route link); fall back to a bridge the
         # container is on when there's no identifiable uplink. Drawn after layout
-        # so they don't pull the container columns toward the uplink.
-        uplink = state.uplink()
-        uplink_node = if_nodes.get(uplink.name) if uplink else None
+        # so they sit on top; the uplink coupling itself is already in the layout.
         for node in container_nodes:
             if not node.container.ports:
                 continue

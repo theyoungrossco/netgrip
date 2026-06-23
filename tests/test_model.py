@@ -140,3 +140,23 @@ def test_host_state_docker_helpers():
     # PortMapping label: all-addresses bind drops the host IP; a pinned one keeps it.
     assert PortMapping("0.0.0.0", 8080, 80, "tcp").label() == ":8080→80/tcp"
     assert PortMapping("10.0.0.1", 5, 6, "udp").label() == "10.0.0.1:5→6/udp"
+
+
+def test_is_docker_owned():
+    from netgrip.core.model import Container, DockerNetwork, HostState
+
+    state = HostState(
+        label="d",
+        interfaces=[
+            Interface(name="docker0", kind="bridge", docker_network="bridge"),
+            Interface(name="veth0", kind="veth", master="docker0"),
+            Interface(name="eth0", kind="physical",
+                      gateways={4: Gateway("10.0.0.1")}),
+        ],
+        docker_networks=[DockerNetwork(name="bridge", bridge="docker0")],
+        containers=[Container(name="c", networks={"bridge": "172.17.0.2"})],
+    )
+    assert state.is_docker_owned(state.get("docker0")) is True   # the bridge
+    assert state.is_docker_owned(state.get("veth0")) is True     # a member of it
+    assert state.is_docker_owned(state.get("eth0")) is False     # the host uplink
+    assert state.docker_bridge_names() == {"docker0"}

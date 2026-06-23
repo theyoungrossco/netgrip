@@ -35,6 +35,12 @@ from __future__ import annotations
 from collections import defaultdict, deque
 from dataclasses import dataclass
 
+# When a box connects to several boxes in the next column, widen the gap after
+# its column so the fan of connector lines spreads out instead of overlapping
+# into one another. Extra pixels per child beyond the first, and a ceiling.
+FANOUT_GAP_STEP = 16.0
+FANOUT_GAP_MAX = 200.0
+
 
 @dataclass(frozen=True)
 class Box:
@@ -152,7 +158,7 @@ def _layout_component(
         order[layer[key]].append(key)
     _order_columns(order, max_layer, layer, adj, sweeps)
 
-    node_x = _assign_x(order, max_layer, by_key, col_gap)
+    node_x = _assign_x(order, max_layer, by_key, col_gap, adj)
     node_y = _assign_y(order, max_layer, by_key, adj, layer, row_gap, sweeps)
 
     if comp:
@@ -238,18 +244,30 @@ def _assign_x(
     max_layer: int,
     by_key: dict[str, Box],
     col_gap: float,
+    adj: dict[str, set[str]],
 ) -> dict[str, float]:
     """Adaptive column widths; each box centred within its column so
-    centre-to-centre edges between columns run as horizontal as possible."""
+    centre-to-centre edges between columns run as horizontal as possible. The
+    gap after a column is widened when its boxes fan out to many neighbours in
+    the next column, so the connector lines spread rather than overlap."""
+    col_of = {k: col for col in range(max_layer + 1) for k in order[col]}
     col_width = {
         col: max((by_key[k].width for k in order[col]), default=0.0)
         for col in range(max_layer + 1)
     }
+
+    def fanout(col: int) -> int:
+        return max(
+            (sum(1 for v in adj[k] if col_of.get(v) == col + 1) for k in order[col]),
+            default=0,
+        )
+
     col_left: dict[int, float] = {}
     x = 0.0
     for col in range(max_layer + 1):
         col_left[col] = x
-        x += col_width[col] + col_gap
+        extra = min(FANOUT_GAP_MAX, max(0, fanout(col) - 1) * FANOUT_GAP_STEP)
+        x += col_width[col] + col_gap + extra
 
     node_x: dict[str, float] = {}
     for col in range(max_layer + 1):

@@ -228,18 +228,32 @@ class GroupNode(BaseNode):
 
     def __init__(self, iface: Interface, member_count: int):
         lines = []
-        if iface.alias:
-            lines.append(iface.alias)
+        # A bridge's title prefers a human label: its alias, else its docker
+        # network name, else the bare (often random) br-… ifname — so a docker
+        # bridge reads as "mc-docker_default", not "br-3926f46f7329", with the
+        # ifname kept as a detail line. Bonds/teams keep the ifname as the title.
+        if iface.kind == "bridge":
+            title = iface.alias or iface.docker_network or iface.name
+        else:
+            title = iface.name
+            if iface.alias:
+                lines.append(iface.alias)
         if iface.kind == "bond":
             lines.append(BOND_MODES.get(iface.bond_mode or "", iface.bond_mode or "bond"))
+        elif iface.docker_network:
+            # The docker network is the title when there's no alias; name it
+            # here only when the alias took the title.
+            if title != iface.docker_network:
+                lines.append(f"docker: {iface.docker_network}")
+            lines.append("docker bridge")
         else:
             lines.append(iface.kind)
         if iface.kind == "bridge" and iface.bridge_vlan_aware:
             lines.append("vlan-aware")
-        if iface.docker_network:
-            lines.append(f"docker: {iface.docker_network}")
+        if title != iface.name:
+            lines.append(iface.name)  # the real br-… ifname, last
         body, border = theme.node("group")
-        super().__init__(iface.name, lines, body, border)
+        super().__init__(title, lines, body, border)
         self.iface = iface
         self.key = f"if:{iface.name}"
 
@@ -829,14 +843,33 @@ class PortEdge(QGraphicsPathItem):
         # with many published ports turns into a wall of text.
         if not self._label or not (self._a.isSelected() or self._b.isSelected()):
             return
-        mid = (self._a.anchor() + self._b.anchor()) / 2
         painter.setFont(self._font)
         fm = QFontMetricsF(self._font)
         text = fm.elidedText(self._label, Qt.TextElideMode.ElideRight, MAX_TEXT_W)
         w = fm.horizontalAdvance(text)
-        chip = QRectF(mid.x() - w / 2 - 4, mid.y() - fm.height() / 2 - 1, w + 8, fm.height() + 2)
+        pos = self._label_anchor(w, fm.height())
+        chip = QRectF(pos.x() - w / 2 - 4, pos.y() - fm.height() / 2 - 1, w + 8, fm.height() + 2)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(theme.background())  # blank the line behind the text
         painter.drawRoundedRect(chip, 3, 3)
         painter.setPen(QPen(theme.text_dim()))
-        painter.drawText(QPointF(mid.x() - w / 2, mid.y() + fm.ascent() - fm.height() / 2), text)
+        painter.drawText(QPointF(pos.x() - w / 2, pos.y() + fm.ascent() - fm.height() / 2), text)
+
+    def _label_anchor(self, w: float, h: float) -> QPointF:
+        """A point along the line for the label, biased to the midpoint but
+        nudged toward the ends to dodge any box it would otherwise sit on top
+        of. Falls back to the midpoint if every candidate collides."""
+        a, b = self._a.anchor(), self._b.anchor()
+        scene = self.scene()
+        boxes = []
+        if scene is not None:
+            boxes = [
+                it.sceneBoundingRect() for it in scene.items()
+                if isinstance(it, (BaseNode, RegionNode)) and it not in (self._a, self._b)
+            ]
+        for frac in (0.5, 0.42, 0.58, 0.34, 0.66, 0.26, 0.74):
+            pos = a * (1 - frac) + b * frac
+            chip = QRectF(pos.x() - w / 2 - 4, pos.y() - h / 2 - 1, w + 8, h + 2)
+            if not any(chip.intersects(box) for box in boxes):
+                return pos
+        return (a + b) / 2

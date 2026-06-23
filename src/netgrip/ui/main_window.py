@@ -950,6 +950,14 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ #
     def _on_ip_dropped(self, node: IpNode, target, clone: bool) -> None:
         target_name = target.iface.name
+        # Docker owns its bridges' addressing and its containers' IPs; refuse to
+        # add/move/clone an address onto (or away from) docker-managed config.
+        if self._docker_owned(target.iface):
+            self._refuse_docker(target_name)
+            return
+        if not node.is_draft and self._docker_owned(node.parent_name):
+            self._refuse_docker(node.parent_name)
+            return
         if node.is_draft:
             self._attach_draft(node, target_name)
         elif clone:
@@ -970,6 +978,9 @@ class MainWindow(QMainWindow):
 
     def _on_nic_dropped(self, node: NicNode, target) -> None:
         nic = node.iface.name
+        if self._docker_owned(target.iface):
+            self._refuse_docker(target.iface.name)
+            return
         if isinstance(target, GroupNode):
             self._apply(
                 f"Add {nic} to {target.iface.name}",
@@ -981,6 +992,9 @@ class MainWindow(QMainWindow):
 
     def _on_vlan_dropped(self, node: VlanNode, target) -> None:
         new_parent = target.iface.name
+        if self._docker_owned(target.iface):
+            self._refuse_docker(new_parent)
+            return
         self._apply(
             f"Move {node.iface.name} to {new_parent}",
             actions.plan_move_vlan(node.iface, new_parent),
@@ -1011,7 +1025,10 @@ class MainWindow(QMainWindow):
         elif isinstance(node, IpNode):
             self._fill_ip_menu(menu, node)
         elif isinstance(node, GroupNode):
-            self._fill_group_menu(menu, node.iface)
+            if self._docker_owned(node.iface):
+                self._fill_docker_readonly_menu(menu, node.iface)
+            else:
+                self._fill_group_menu(menu, node.iface)
         elif isinstance(node, VlanNode):
             self._fill_vlan_menu(menu, node.iface)
         elif isinstance(node, DraftVlanNode):
@@ -1021,11 +1038,41 @@ class MainWindow(QMainWindow):
         if not menu.isEmpty():
             menu.exec(global_pos)
 
+    def _docker_owned(self, iface_or_name) -> bool:
+        """Whether a link (by Interface or name) is docker-managed, hence shown
+        read-only — see HostState.is_docker_owned."""
+        if not self.state:
+            return False
+        iface = (iface_or_name if isinstance(iface_or_name, Interface)
+                 else self.state.get(iface_or_name))
+        return bool(iface and self.state.is_docker_owned(iface))
+
+    def _refuse_docker(self, name: str) -> None:
+        """Bounce a mutating gesture aimed at docker-owned config: explain why
+        and redraw so any dragged box snaps back to where it was."""
+        self.statusBar().showMessage(
+            f"{name} is managed by Docker — edit it with docker / compose, not here."
+        )
+        self._repopulate()
+
+    def _fill_docker_readonly_menu(self, menu: QMenu, iface: Interface) -> None:
+        net = iface.docker_network or (
+            self.state.docker_network_for_bridge(iface.master).name
+            if iface.master and self.state.docker_network_for_bridge(iface.master) else None
+        )
+        header = f"Managed by Docker ({net})" if net else "Managed by Docker"
+        menu.addAction(header).setEnabled(False)
+        menu.addAction("Read-only here — edit with docker / compose").setEnabled(False)
+
     def _show_region_menu(self, group: IpGroup, global_pos: QPoint) -> None:
         if not self.state:
             return
         iface, family = group.iface, group.family
         menu = QMenu(self)
+        if self._docker_owned(iface):
+            self._fill_docker_readonly_menu(menu, iface)
+            menu.exec(global_pos)
+            return
         menu.addAction(
             f"IPv{family} protocol settings…",
             partial(self._ipgroup_settings_dialog, iface, family),
@@ -1194,6 +1241,12 @@ class MainWindow(QMainWindow):
             )
             return
 
+        if self._docker_owned(node.parent_name):
+            # Docker assigns this address (the bridge gateway / a container IP);
+            # editing or moving it would break docker, so the box is read-only.
+            self._fill_docker_readonly_menu(menu, self.state.get(node.parent_name))
+            return
+
         menu.addAction("Edit address…", partial(self._edit_ip_dialog, node))
         menu.addAction("Set name…", partial(self._name_ip_dialog, node))
         menu.addAction("Clone (as draft)", partial(self._clone_ip, node))
@@ -1220,6 +1273,7 @@ class MainWindow(QMainWindow):
             if i.name != exclude
             and i.master is None
             and (i.kind in ("physical", "vlan", "loopback") or i.kind in GROUP_KINDS)
+            and not self.state.is_docker_owned(i)  # can't attach to a docker bridge
         ]
 
     def _show_canvas_menu(self, global_pos: QPoint, scene_pos: QPointF) -> None:
@@ -1437,6 +1491,9 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"{cidr} will be removed from {name} when you Save.")
 
     def _detach_ip(self, node: IpNode) -> None:
+        if self._docker_owned(node.parent_name):
+            self._refuse_docker(node.parent_name)
+            return
         family, cidr, pos = node.family, node.cidr, node.pos()
         self._apply(
             f"Detach IPv{family} config from {node.parent_name}",

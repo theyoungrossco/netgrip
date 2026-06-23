@@ -113,6 +113,7 @@ def demo_interfaces() -> list[Interface]:
         Interface(
             name="docker0", index=13, kind="bridge", state="up",
             mac="02:42:9b:11:22:01", mtu=1500,
+            addresses=[Address("172.17.0.1", 16, 4)],  # docker's bridge gateway
         ),
         Interface(
             name="veth1a2b3c", index=14, kind="veth", state="up",
@@ -121,6 +122,7 @@ def demo_interfaces() -> list[Interface]:
         Interface(
             name="br-abc123def456", index=15, kind="bridge", state="up",
             mac="02:42:9b:11:22:10", mtu=1500,
+            addresses=[Address("172.18.0.1", 16, 4)],  # the "web" network gateway
         ),
         Interface(
             name="veth4d5e6f", index=16, kind="veth", state="up",

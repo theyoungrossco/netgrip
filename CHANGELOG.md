@@ -18,7 +18,14 @@ adheres to [Semantic Versioning](https://semver.org/).
   the host in); its `:8080→80/tcp` label — and the bound host IP when it isn't
   `0.0.0.0` — is revealed when either end is **selected**, to keep a busy host
   readable. Read best-effort via `docker network inspect` / `docker inspect`, so
-  a host without docker — or without daemon access — is unaffected. See
+  a host without docker — or without daemon access — is unaffected. Docker-owned
+  links are **read-only** (a docker bridge and its members): netgrip refuses to
+  rename, delete, re-address, add members to or move addresses off them, since
+  that would break docker — edit those through docker / compose. A docker bridge
+  is now titled by its **network name** (its alias if set, else the docker
+  network, else the `br-…` ifname kept as a detail line), and the whole docker
+  subgraph lays out **left-to-right from the host's uplink** (uplink → containers
+  → bridge), never with a bridge stuck in the left column. See
   [docs/0.4-PLAN.md](docs/0.4-PLAN.md).
 
 ### Fixed
@@ -29,6 +36,9 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **Canvas layout spaces out fan-outs**: when a box connects to several boxes in
+  the next column, the gap after its column widens so the connector lines spread
+  rather than overlap into one another.
 - **New app icon** — an "N" monogram with four coloured nodes — replacing the
   previous mark across the README, the Linux desktop/scalable icon, the Windows
   `.ico` (executable, shortcut and installer), and the GitHub social preview.

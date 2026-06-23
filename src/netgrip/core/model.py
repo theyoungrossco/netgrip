@@ -284,6 +284,16 @@ class HostState:
     def containers_on(self, network: str) -> list[Container]:
         return [c for c in self.containers if network in c.networks]
 
+    def docker_bridge_names(self) -> set[str]:
+        return {n.bridge for n in self.docker_networks if n.bridge}
+
+    def is_docker_owned(self, iface: Interface) -> bool:
+        """True for a docker-managed link — a docker bridge, or a member of one.
+        NetGrip shows these read-only: altering them (delete, add member, change
+        the gateway address, move an address) breaks docker, so they're edited
+        through docker / compose, not here."""
+        return iface.docker_network is not None or iface.master in self.docker_bridge_names()
+
     def uplink(self) -> Interface | None:
         """The interface carrying the IPv4 default route — the host's edge, used
         to anchor the dashed published-port connectors. None if no default route
