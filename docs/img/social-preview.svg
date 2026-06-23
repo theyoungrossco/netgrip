@@ -19,17 +19,17 @@
 
   <!-- ================= left: wordmark ================= -->
   <g transform="translate(96,232)">
-    <!-- logo glyph -->
-    <g transform="scale(0.86)">
-      <rect width="128" height="128" rx="14" fill="#2b3a4a" stroke="#46596b" stroke-width="1.5"/>
-      <g stroke="#8a949e" stroke-width="3">
-        <line x1="38" y1="64" x2="74" y2="36"/>
-        <line x1="38" y1="64" x2="74" y2="92"/>
-      </g>
-      <rect x="14" y="48" width="32" height="32" fill="#e7eef5" stroke="#46729c" stroke-width="3"/>
-      <rect x="74" y="22" width="28" height="28" fill="#e0f0dc" stroke="#3f8a44" stroke-width="3"/>
-      <rect x="74" y="78" width="28" height="28" fill="#e9e2f6" stroke="#6d51a8" stroke-width="3"/>
-      <circle cx="41" cy="53" r="3.5" fill="#2e9e4f"/>
+    <!-- logo glyph: N monogram, matching data/icons/io.github.theyoungrossco.netgrip.svg -->
+    <g transform="scale(0.275)">
+      <rect width="400" height="400" rx="88" fill="#1e2228" stroke="#46596b" stroke-width="5"/>
+      <polyline points="120,290 120,110 280,290 280,110" fill="none" stroke="#828b94"
+                stroke-width="22" stroke-linejoin="round" stroke-linecap="round"/>
+      <rect x="89" y="79" width="62" height="62" rx="17.36" fill="#26313d" stroke="#5b8cb5" stroke-width="3"/>
+      <rect x="249" y="79" width="62" height="62" rx="17.36" fill="#2a2440" stroke="#9b86cf" stroke-width="3"/>
+      <rect x="89" y="259" width="62" height="62" rx="17.36" fill="#1f3020" stroke="#5fae5f" stroke-width="3"/>
+      <rect x="249" y="259" width="62" height="62" rx="17.36" fill="#36301f" stroke="#c79a52" stroke-width="3"/>
+      <circle cx="135.99" cy="92.97" r="6.96" fill="#46e06a"/>
+      <circle cx="295.87" cy="273.31" r="6.96" fill="#46e06a"/>
     </g>
   </g>
 

@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- **New app icon** — an "N" monogram with four coloured nodes — replacing the
+  previous mark across the README, the Linux desktop/scalable icon, the Windows
+  `.ico` (executable, shortcut and installer), and the GitHub social preview.
+
 ## [0.3.0] - 2026-06-21
 
 The work since 0.1.0 in one alpha release: persistence (Try / Apply / Save
