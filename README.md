@@ -12,6 +12,7 @@
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20(SSH)-lightgrey.svg)](#installing)
 [![Status: alpha](https://img.shields.io/badge/status-alpha-orange.svg)](#status)
 [![Website](https://img.shields.io/badge/web-netgrip.org-blue.svg)](https://netgrip.org)
+[![X](https://img.shields.io/badge/X-%40netgripapp-black.svg)](https://x.com/netgripapp)
 
 [Website](https://netgrip.org) ·
 [Installing](#installing) ·
@@ -210,8 +211,9 @@ plenty to do even if GUI code isn't your thing.
 
 Project home: [netgrip.org](https://netgrip.org). Questions, bug reports and
 feedback are welcome — open an issue on
-[GitHub](https://github.com/theyoungrossco/netgrip/issues) or email
-[hello@netgrip.org](mailto:hello@netgrip.org).
+[GitHub](https://github.com/theyoungrossco/netgrip/issues), email
+[contact@netgrip.org](mailto:contact@netgrip.org), or follow
+[@netgripapp](https://x.com/netgripapp) on X.
 
 ## License
 
