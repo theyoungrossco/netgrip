@@ -347,3 +347,18 @@ def affected_links(plan: list[list[str]]) -> set[str]:
         if argv[:3] == ["ip", "link", "add"] and len(argv) > 3 and argv[3] != "link":
             links.add(argv[3])
     return links
+
+
+def plan_install_ifupdown2() -> list[list[str]]:
+    """Install ifupdown2 on a Debian/Proxmox host so it gains a persistence
+    backend NetGrip can Save through.
+
+    Classic ifupdown manages ``/etc/network/interfaces`` but lacks ``ifreload``,
+    the apply tool the ifupdown write-through drives; ifupdown2 is a drop-in
+    replacement that adds it and reads the same file. The ``env
+    DEBIAN_FRONTEND=noninteractive`` prefix keeps apt from blocking on a debconf
+    prompt — there is no tty under the single non-interactive sudo/ssh batch."""
+    return [
+        ["apt-get", "update"],
+        ["env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "-y", "ifupdown2"],
+    ]

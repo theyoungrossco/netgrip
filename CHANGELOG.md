@@ -8,6 +8,20 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Enable persistence on a runtime-only host, in one click**: when NetGrip
+  detects a Debian/Proxmox box running classic **ifupdown** (an
+  `/etc/network/interfaces` file, but no `ifreload`) on an `apt` host, the
+  status-bar **Persist** indicator becomes clickable. Clicking it installs
+  **ifupdown2** through the normal confirm → elevate → run → re-probe flow; the
+  re-probe then re-detects the backend, so the indicator flips from *Runtime
+  only* to *ifupdown* and **Save** starts persisting — no shell required.
+- **Remote sudo password over SSH**: privileged actions on a host that requires
+  a password for `sudo` now prompt for it (once, cached for the session) and run
+  via `sudo -S`, with the password sent only over the SSH channel's stdin —
+  never the command line, the remote environment, or disk. Previously a remote
+  host needed root login or passwordless sudo, so managing a password-sudo box
+  from a client without a local `sudo` (e.g. Windows) failed silently with no
+  prompt. Root login and passwordless sudo still work unchanged.
 - **Export diagram** (`File ▸ Export diagram…`): save the canvas — exactly as
   shown, every visible box, line and glyph in its on-screen colour over the
   themed background — to a vector **SVG** or **PDF**. SVG is sized to the

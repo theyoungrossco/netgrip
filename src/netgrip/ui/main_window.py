@@ -8,8 +8,8 @@ import ipaddress
 import secrets
 from functools import partial
 
-from PySide6.QtCore import QPoint, QPointF, QSettings, Qt, QTimer
-from PySide6.QtGui import QAction, QIcon, QKeySequence
+from PySide6.QtCore import QPoint, QPointF, QSettings, Qt, QTimer, Signal
+from PySide6.QtGui import QAction, QIcon, QKeySequence, QPalette
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -118,6 +118,22 @@ SAVE_SETTLE_MS = 1500
 AUTO_REFRESH_MS = 10000
 
 
+class _ClickableLabel(QLabel):
+    """A status-bar label that emits ``clicked`` on a left press.
+
+    The persistence indicator uses this for its one-click remediation. A QLabel
+    rich-text ``<a>`` link / ``linkActivated`` proved unreliable as a status-bar
+    permanent widget, so we handle the press directly and let the slot decide
+    whether there is an action to run."""
+
+    clicked = Signal()
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt override)
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
+
 class MainWindow(QMainWindow):
     def __init__(self, initial_host: str | None = None, demo: bool = False):
         super().__init__()
@@ -197,11 +213,12 @@ class MainWindow(QMainWindow):
         # Persistent persistence indicator on the right of the status bar: which
         # subsystem owns config on the current host and whether changes survive a
         # reboot. Stays put while transient messages scroll on the left.
-        self._backend_label = QLabel()
+        self._backend_label = _ClickableLabel()
         self._backend_label.setContentsMargins(0, 0, 8, 0)
-        # Runtime-only hosts that could gain a backend render the indicator as a
-        # link; clicking it offers the remediation (see _update_backend_indicator).
-        self._backend_label.linkActivated.connect(self._on_backend_link)
+        # Runtime-only hosts that could gain a backend make the indicator
+        # clickable; clicking runs the remediation (see _update_backend_indicator
+        # / _on_backend_clicked).
+        self._backend_label.clicked.connect(self._on_backend_clicked)
         self.statusBar().addPermanentWidget(self._backend_label)
         self.statusBar().showMessage("Ready")
 
@@ -656,32 +673,37 @@ class MainWindow(QMainWindow):
             if backend.persists
             else "Changes apply at runtime only and are lost on reboot."
         )
+        self._backend_label.setText(f"Persist: {backend.label}")
+        # Style the label's own text through its palette + font, NOT a stylesheet:
+        # a `color` / `text-decoration` stylesheet on a QLabel bleeds into the
+        # label's tooltip, painting the whole tooltip red and underlined. Palette
+        # (WindowText) and font underline affect only the label text.
+        palette = self._backend_label.palette()
+        palette.setColor(QPalette.ColorRole.WindowText, colour)
+        self._backend_label.setPalette(palette)
+        font = self._backend_label.font()
+        # Underline + hand cursor mark the indicator as clickable when there's a
+        # one-click remediation (install ifupdown2 on a runtime-only ifupdown host).
+        font.setUnderline(backend.install_ifupdown2)
+        self._backend_label.setFont(font)
         if backend.install_ifupdown2:
-            # One-click remediation: render the indicator as a link that installs
-            # ifupdown2 (which provides ifreload), turning this runtime-only host
-            # into an ifupdown backend Save can write through. The link carries
-            # its own colour, so clear any stylesheet left from a plain render.
-            self._backend_label.setStyleSheet("")
-            self._backend_label.setText(
-                f'<a href="install-ifupdown2" style="color:{colour.name()}; '
-                f'text-decoration:underline;">Persist: {backend.label}</a>'
-            )
             self._backend_label.setCursor(Qt.CursorShape.PointingHandCursor)
             note += "\n\nClick to install ifupdown2 and enable persistent configuration."
         else:
-            self._backend_label.setText(f"Persist: {backend.label}")
-            self._backend_label.setStyleSheet(f"color: {colour.name()};")
             self._backend_label.setCursor(Qt.CursorShape.ArrowCursor)
         self._backend_label.setToolTip(f"{backend.summary}\n\n{note}")
 
-    def _on_backend_link(self, href: str) -> None:
-        """Handle a click on the persistence indicator's remediation link.
+    def _on_backend_clicked(self) -> None:
+        """Handle a click on the persistence indicator.
 
-        The only link today installs ifupdown2 on a runtime-only ifupdown host;
-        it goes through the normal confirm → run → re-probe path, and the
-        post-apply re-probe re-detects the backend, so the indicator updates
+        Only acts when the current host is a runtime-only ifupdown box that
+        ifupdown2 would make writable; then it installs it through the normal
+        ``_apply`` path — the same confirm → elevate → run → re-probe flow every
+        networking change uses, so escalation prompts (and caches) identically.
+        The post-apply re-probe re-detects the backend, so the indicator updates
         itself once the package is in."""
-        if href == "install-ifupdown2":
+        backend = self.state.backend if self.state else None
+        if backend and backend.install_ifupdown2:
             self._apply(
                 "Install ifupdown2 (enable persistent configuration)",
                 actions.plan_install_ifupdown2(),
@@ -718,7 +740,7 @@ class MainWindow(QMainWindow):
         )
         if choice == CONFIRM_CANCEL:
             return
-        if not self._ensure_local_escalation():
+        if not self._ensure_escalation():
             return
         if choice == CONFIRM_TRY:
             self._try(title, plan, revert, on_keep=on_success)
@@ -740,14 +762,15 @@ class MainWindow(QMainWindow):
             on_error=self._on_privileged_error,
         )
 
-    def _ensure_local_escalation(self) -> bool:
-        """Before a privileged run on the *local* machine, make sure we can
-        become root — prompting once for a sudo password (then cached for the
-        session) instead of being prompted on every action. Returns False, so
-        the caller aborts, on cancel or when root is unreachable. SSH/demo
-        runners manage their own auth and pass straight through."""
+    def _ensure_escalation(self) -> bool:
+        """Before a privileged run, make sure we can become root on the target —
+        prompting once for a sudo password (then cached for the session) instead
+        of being prompted on every action. Covers both the *local* machine
+        (LocalRunner) and a *remote* host over SSH (SSHRunner); demo passes
+        through. Returns False, so the caller aborts, on cancel or when root is
+        unreachable."""
         runner = self.runner
-        if not isinstance(runner, LocalRunner):
+        if not isinstance(runner, (LocalRunner, SSHRunner)):
             return True
         status = runner.escalation_status()
         if status == "ready":
@@ -756,11 +779,15 @@ class MainWindow(QMainWindow):
             self._show_error(
                 "NetGrip can't gain administrator rights on this machine. Run it "
                 "as root, set up passwordless sudo, or install polkit (pkexec)."
+                if isinstance(runner, LocalRunner)
+                else f"NetGrip can't gain root on {runner.label}: you are not a "
+                "sudoer there (or sudo isn't installed). Log in as root or grant "
+                "your user sudo access."
             )
             return False
         return self._prompt_sudo_password(runner)
 
-    def _prompt_sudo_password(self, runner: LocalRunner) -> bool:
+    def _prompt_sudo_password(self, runner: LocalRunner | SSHRunner) -> bool:
         password, ok = QInputDialog.getText(
             self, "Authentication required",
             f"Administrator (sudo) password for {runner.label}:",
@@ -768,16 +795,25 @@ class MainWindow(QMainWindow):
         )
         if not ok or not password:
             return False
-        runner.set_password(password)
+        # On SSH the sudo password is distinct from the login password, so it has
+        # its own setter; locally the one cached password drives sudo.
+        if isinstance(runner, SSHRunner):
+            runner.set_sudo_password(password)
+        else:
+            runner.set_password(password)
         return True
 
     def _on_privileged_error(self, message: str) -> None:
         """Error handler for a privileged run. A wrong cached sudo password is
         cleared (so the next attempt re-prompts) rather than looping on it."""
         self._set_busy(False)
-        if isinstance(self.runner, LocalRunner) and sudo_auth_failed(message):
-            self.runner.set_password(None)
+        runner = self.runner
+        if isinstance(runner, LocalRunner) and sudo_auth_failed(message):
+            runner.set_password(None)
             self._show_error("Incorrect administrator password. Please retry the action.")
+        elif isinstance(runner, SSHRunner) and sudo_auth_failed(message):
+            runner.set_sudo_password(None)
+            self._show_error("Incorrect sudo password. Please retry the action.")
         else:
             self._show_error(message)
 
