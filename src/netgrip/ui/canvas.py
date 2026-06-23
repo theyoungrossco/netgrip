@@ -4,13 +4,15 @@ drops of one box onto another.
 
 from __future__ import annotations
 
-from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QPainter
+from PySide6.QtCore import QMarginsF, QPoint, QPointF, QRectF, QSize, Qt, Signal
+from PySide6.QtGui import QPageLayout, QPageSize, QPainter, QPdfWriter
+from PySide6.QtSvg import QSvgGenerator
 from PySide6.QtWidgets import QApplication, QGraphicsScene, QGraphicsView
 
 from netgrip.core import layout, store
 from netgrip.core.model import HostState, ip_family
 from netgrip.ui import theme
+from netgrip.ui.branding import app_icon
 from netgrip.ui.items import (
     BaseNode,
     ContainerNode,
@@ -113,6 +115,113 @@ class Canvas(QGraphicsView):
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self.position_corner_widget()
+
+    # ------------------------------------------------------------------ #
+    # export (the diagram, as shown, to a vector file)
+    # ------------------------------------------------------------------ #
+    def export_diagram(self, path: str, fmt: str) -> bool:
+        """Render the diagram exactly as shown — every visible box, line and
+        glyph in its on-screen colour, over the themed background, with the
+        legend (when shown) in its own column so it never overlaps the diagram,
+        and a small NetGrip monogram pinned bottom-right — to a vector file.
+        ``fmt`` is ``"svg"`` or ``"pdf"``.
+
+        SVG is sized to the content (1:1, infinitely scalable); PDF is a
+        standard US Letter page with the diagram scaled to fit, so it prints
+        without fuss and can be rescaled from there.
+
+        Pure rendering: it reads the live scene only, runs no commands and
+        changes no host state. Returns False if the canvas is empty.
+        """
+        scene = self.scene()
+        content = scene.itemsBoundingRect()
+        if content.isEmpty():  # check before margins — adjusting (0,0,0,0) hides it
+            return False
+        src = content.adjusted(-MARGIN, -MARGIN, MARGIN, MARGIN)
+
+        # The legend is the top-left overlay; include it as a document element
+        # when shown. The top-right overlay is the Save button — a control, never
+        # part of an exported document — so it is deliberately left out.
+        legend = self._corner_widgets.get("top-left")
+        if legend is None or not legend.isVisible():
+            legend = None
+
+        if fmt == "pdf":
+            writer = QPdfWriter(path)
+            writer.setResolution(96)  # one logical unit == one on-screen pixel
+            writer.setPageSize(QPageSize(QPageSize.PageSizeId.Letter))
+            # Orient the page to suit the diagram so it fills the sheet better.
+            writer.setPageOrientation(
+                QPageLayout.Orientation.Landscape
+                if src.width() >= src.height()
+                else QPageLayout.Orientation.Portrait
+            )
+            writer.setPageMargins(QMarginsF(0.5, 0.5, 0.5, 0.5), QPageLayout.Unit.Inch)
+            painter = QPainter(writer)
+            page = QRectF(0, 0, writer.width(), writer.height())
+            try:
+                self._paint_export(painter, page, src, legend, fit=True)
+            finally:
+                painter.end()
+        else:  # svg — size the canvas to fit the diagram plus a legend column
+            pad = 16.0
+            lw = float(legend.width()) if legend else 0.0
+            lh = float(legend.height()) if legend else 0.0
+            inner_w = src.width() + (pad + lw if legend else 0.0)
+            inner_h = max(src.height(), lh)
+            w = max(1, int(inner_w + 2 * pad))
+            h = max(1, int(inner_h + 2 * pad))
+            gen = QSvgGenerator()
+            gen.setFileName(path)
+            gen.setSize(QSize(w, h))
+            gen.setViewBox(QRectF(0, 0, w, h))
+            gen.setTitle("NetGrip diagram")
+            gen.setDescription("Network topology exported by NetGrip")
+            painter = QPainter(gen)
+            try:
+                self._paint_export(painter, QRectF(0, 0, w, h), src, legend, fit=False)
+            finally:
+                painter.end()
+        return True
+
+    def _paint_export(self, painter: QPainter, page: QRectF, src: QRectF,
+                      legend, *, fit: bool) -> None:
+        """Paint the export onto ``page``: themed background, the diagram (scaled
+        to fit when ``fit``, else 1:1), the ``legend`` in a reserved right-hand
+        column (never over the diagram), and the monogram bottom-right."""
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        painter.fillRect(page, theme.background())  # "as shown" — themed backdrop
+
+        pad = 16.0
+        avail = page.adjusted(pad, pad, -pad, -pad)
+        # Reserve a column on the right for the legend so it can't collide with
+        # the diagram; the diagram is laid out into what's left.
+        legend_col = (float(legend.width()) + pad) if legend else 0.0
+        area = QRectF(avail.left(), avail.top(),
+                      max(1.0, avail.width() - legend_col), avail.height())
+
+        scale = (min(area.width() / src.width(), area.height() / src.height())
+                 if fit else 1.0)
+        dw, dh = src.width() * scale, src.height() * scale
+        # Centre the diagram within its area.
+        target = QRectF(area.left() + (area.width() - dw) / 2,
+                        area.top() + (area.height() - dh) / 2, dw, dh)
+        self.scene().render(painter, target, src)
+
+        if legend is not None:
+            lx = int(avail.right() - legend.width())
+            ly = int(avail.top())
+            legend.render(painter, QPoint(lx, ly))
+
+        # A small NetGrip monogram, pinned bottom-right.
+        pm = app_icon().pixmap(40, 40)
+        if not pm.isNull():
+            m = 16
+            painter.drawPixmap(
+                QPointF(page.right() - pm.width() - m, page.bottom() - pm.height() - m),
+                pm,
+            )
 
     # ------------------------------------------------------------------ #
     # population & layout

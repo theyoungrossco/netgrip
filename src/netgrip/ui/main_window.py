@@ -13,6 +13,7 @@ from PySide6.QtGui import QAction, QIcon, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
+    QFileDialog,
     QInputDialog,
     QLabel,
     QLineEdit,
@@ -198,6 +199,9 @@ class MainWindow(QMainWindow):
         # reboot. Stays put while transient messages scroll on the left.
         self._backend_label = QLabel()
         self._backend_label.setContentsMargins(0, 0, 8, 0)
+        # Runtime-only hosts that could gain a backend render the indicator as a
+        # link; clicking it offers the remediation (see _update_backend_indicator).
+        self._backend_label.linkActivated.connect(self._on_backend_link)
         self.statusBar().addPermanentWidget(self._backend_label)
         self.statusBar().showMessage("Ready")
 
@@ -272,6 +276,16 @@ class MainWindow(QMainWindow):
         self.host_combo.activated.connect(self._host_picked)
         bar.addWidget(self.host_combo)
 
+        # File menu (export, with room for future file actions). A dropdown
+        # button mirroring View/Help, since the window has no menubar.
+        file_button = QToolButton()
+        file_button.setText("File")
+        file_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        file_menu = QMenu(file_button)
+        file_menu.addAction("Export diagram…", self._export_diagram)
+        file_button.setMenu(file_menu)
+        bar.addWidget(file_button)
+
         # Refresh as an icon (with a text fallback where the theme has no icon);
         # the F5 shortcut surfaces in the tooltip since the label is hidden.
         refresh = QAction(self)
@@ -337,6 +351,39 @@ class MainWindow(QMainWindow):
         help_menu.addAction("About NetGrip", self._about)
         self.help_button.setMenu(help_menu)
         bar.addWidget(self.help_button)
+
+    def _export_diagram(self) -> None:
+        """Save the current diagram, exactly as shown, to an SVG or PDF file."""
+        if self.canvas.scene().itemsBoundingRect().isEmpty():
+            QMessageBox.information(
+                self, "Export diagram", "There's nothing on the canvas to export yet."
+            )
+            return
+        host = getattr(self.canvas, "_host_label", None) or "netgrip"
+        safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in host)
+        path, selected = QFileDialog.getSaveFileName(
+            self, "Export diagram", f"{safe}-network.svg",
+            "SVG image (*.svg);;PDF document (*.pdf)",
+        )
+        if not path:
+            return
+        lower = path.lower()
+        if lower.endswith(".pdf"):
+            fmt = "pdf"
+        elif lower.endswith(".svg"):
+            fmt = "svg"
+        else:  # no extension typed — take it from the chosen filter
+            fmt = "pdf" if "pdf" in selected.lower() else "svg"
+            path += f".{fmt}"
+        try:
+            ok = self.canvas.export_diagram(path, fmt)
+        except OSError as exc:
+            QMessageBox.warning(self, "Export failed", str(exc))
+            return
+        if not ok:
+            QMessageBox.information(
+                self, "Export diagram", "There's nothing on the canvas to export yet."
+            )
 
     def _loopback_toggled(self, checked: bool) -> None:
         QSettings().setValue("show_loopback", checked)
@@ -600,16 +647,45 @@ class MainWindow(QMainWindow):
         if backend is None:
             self._backend_label.clear()
             self._backend_label.setToolTip("")
+            self._backend_label.setStyleSheet("")
+            self._backend_label.setCursor(Qt.CursorShape.ArrowCursor)
             return
         colour = theme.text_dim() if backend.persists else theme.error()
-        self._backend_label.setText(f"Persist: {backend.label}")
-        self._backend_label.setStyleSheet(f"color: {colour.name()};")
         note = (
             "Save will write persistent configuration through this backend."
             if backend.persists
             else "Changes apply at runtime only and are lost on reboot."
         )
+        if backend.install_ifupdown2:
+            # One-click remediation: render the indicator as a link that installs
+            # ifupdown2 (which provides ifreload), turning this runtime-only host
+            # into an ifupdown backend Save can write through. The link carries
+            # its own colour, so clear any stylesheet left from a plain render.
+            self._backend_label.setStyleSheet("")
+            self._backend_label.setText(
+                f'<a href="install-ifupdown2" style="color:{colour.name()}; '
+                f'text-decoration:underline;">Persist: {backend.label}</a>'
+            )
+            self._backend_label.setCursor(Qt.CursorShape.PointingHandCursor)
+            note += "\n\nClick to install ifupdown2 and enable persistent configuration."
+        else:
+            self._backend_label.setText(f"Persist: {backend.label}")
+            self._backend_label.setStyleSheet(f"color: {colour.name()};")
+            self._backend_label.setCursor(Qt.CursorShape.ArrowCursor)
         self._backend_label.setToolTip(f"{backend.summary}\n\n{note}")
+
+    def _on_backend_link(self, href: str) -> None:
+        """Handle a click on the persistence indicator's remediation link.
+
+        The only link today installs ifupdown2 on a runtime-only ifupdown host;
+        it goes through the normal confirm → run → re-probe path, and the
+        post-apply re-probe re-detects the backend, so the indicator updates
+        itself once the package is in."""
+        if href == "install-ifupdown2":
+            self._apply(
+                "Install ifupdown2 (enable persistent configuration)",
+                actions.plan_install_ifupdown2(),
+            )
 
     def _set_busy(self, busy: bool, message: str | None = None) -> None:
         self._busy = busy

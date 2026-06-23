@@ -6,6 +6,17 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **Export diagram** (`File ▸ Export diagram…`): save the canvas — exactly as
+  shown, every visible box, line and glyph in its on-screen colour over the
+  themed background — to a vector **SVG** or **PDF**. SVG is sized to the
+  content (1:1, infinitely scalable); PDF is a standard **US Letter** page
+  (oriented to suit the diagram) with the topology scaled to fit, so it prints
+  without fuss. The **legend**, when shown, is placed in its own reserved
+  column so it never overlaps the diagram, and a small **NetGrip monogram** is
+  pinned bottom-right — giving you an at-a-glance network document for free.
+
 ## [0.4.0] - 2026-06-23
 
 **0.4 — Docker visibility**, a milestone scoped to a single feature: make the
