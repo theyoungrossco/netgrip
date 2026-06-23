@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+This is **0.4 — Docker visibility**, a milestone scoped to a single feature.
+It's stabilising for a 0.4.0 release before the next milestone (0.5, Proxmox /
+vlan-aware bridges) begins. See [ROADMAP.md](ROADMAP.md).
+
 ### Added
 
 - **Docker visibility** (0.4, read-only): a `docker0` / `br-…` bridge is now

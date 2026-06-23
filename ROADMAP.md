@@ -2,11 +2,18 @@
 
 NetGrip's long-term ambition is to be *the* obvious graphical way to manage
 Linux network interfaces — solid enough to ship as a standard package in
-distributions. This file tracks the path there, roughly in order.
+distributions. This file tracks the path there, roughly in order — it's a
+direction, not a contract, and is subject to change as priorities and what we
+learn shift.
 
 The guiding shape of the work: keep each release independently shippable and
 testable, keep the `core` headless and the UI flat, and never apply a change
 the user hasn't seen as an exact command first.
+
+The app is complex enough now that **each feature add is its own milestone** —
+one focused capability per `0.x`, stabilised and merged to `main` with a tagged
+release before the next one starts. No more piling several features under one
+version.
 
 ## 0.1 — now
 
@@ -72,47 +79,56 @@ have landed.
 - DHCP client control (request/release) where a persistence backend allows
 - `teamd` teams (read support first)
 
-## 0.4 — visibility: containers, virtualization & firewall
+## 0.4 — Docker visibility (current — stabilising for release)
 
-This is where NetGrip earns its keep. A Proxmox node or Docker host has dozens
-of `veth`s and bridges whose relationships are invisible today, so the canvas
-reads as a flat mesh of unconnected boxes. The job here is *read-only* clarity
-first — show what connects to what — before any editing.
+This is where NetGrip earns its keep, and it's scoped to a **single** feature:
+making the Docker container layer legible, *read-only*. It's nearly complete —
+the plan is to stabilise it, merge to `main` and cut a **0.4.0** release before
+the next milestone starts.
 
-Two of the original 0.4 foundations already landed in 0.3 and unblock the rest:
-**veth pairs draw as a single shared cable** (peer matched from
-`ip -d -json link`) and **vlan-aware bridge ports show their PVID + tagged
-lists**. What remains:
+A Docker host has dozens of `veth`s and bridges whose relationships are
+invisible today, so the canvas reads as a flat mesh of unconnected boxes. The
+job is *read-only* clarity — show what connects to what — before any editing.
+Two foundations landed in 0.3 and unblock it: **veth pairs draw as a single
+shared cable** (peer matched from `ip -d -json link`) and **vlan-aware bridge
+ports show their PVID + tagged lists**.
 
-- **Docker awareness (first up).** Surface the container layer the host already
-  half-shows: a `docker0` / `br-…` bridge is just an unexplained bridge, and a
-  container's `veth` lands on it anonymously. Read it with `docker network
-  inspect` + `docker inspect` (best-effort, never fails the probe) and draw it
-  so it *makes sense*:
-  - each **bridge network** labelled with its docker network name;
-  - each **container** as its own box on the bridge(s) it joins, showing its
-    **IP per network** and its **compose project / service** (so "IPs per
-    composed container" is legible at a glance);
-  - **published ports** as a **dashed, labelled connector** from the container
-    to the host's uplink — `:8080→80/tcp` — so it's obvious that *only certain
-    ports traverse* from the host into the container, and which host IP they
-    bind. (Later: cross-check published ports against `iptables -t nat` / `nft`
-    rather than trusting docker's own view; pin each individual host `veth` to
-    its container, which needs a netns read; offer edits where they clearly make
-    sense. See [docs/0.4-PLAN.md](docs/0.4-PLAN.md).)
-- **Proxmox / vlan-aware bridges:** build on the port tags shipped in 0.3 — show
-  the `bridge-vlan-aware` flag's source (`/etc/network/interfaces`) and tidy how
-  a trunk vs. access port reads, so a Proxmox node's VLAN topology is fully
-  legible.
-- **Inbound firewall rules** per interface, read from `nft -j list ruleset`
-  (fallback `iptables-save`). Display first; editing is a later, careful step.
+Surface the container layer the host already half-shows: a `docker0` / `br-…`
+bridge is just an unexplained bridge, and a container's `veth` lands on it
+anonymously. Read it with `docker network inspect` + `docker inspect`
+(best-effort, never fails the probe) and draw it so it *makes sense*:
 
-The shared-plumbing model note still holds: an 802.1q **VLAN** subinterface, a
-**veth** virtual cable, and a **bridge port's VLAN filtering** are three
-*different* kernel objects that share a "virtual" feel but each keep their own
-correct name — we do *not* rebrand one to another.
+- each **bridge network** labelled with its docker network name;
+- each **container** as its own box on the bridge(s) it joins, showing its
+  **IP per network** and its **compose project / service** (so "IPs per
+  composed container" is legible at a glance);
+- **published ports** as a **dashed, labelled connector** from the container to
+  the host's uplink — `:8080→80/tcp` — so it's obvious that *only certain ports
+  traverse* from the host into the container, and which host IP they bind.
 
-## 0.5 — scale and polish
+Later (own follow-up milestones if they grow): cross-check published ports
+against `iptables -t nat` / `nft` rather than trusting docker's own view; pin
+each individual host `veth` to its container, which needs a netns read; offer
+edits where they clearly make sense. See [docs/0.4-PLAN.md](docs/0.4-PLAN.md).
+
+## 0.5 — Proxmox / vlan-aware bridges
+
+Build on the port tags shipped in 0.3 — show the `bridge-vlan-aware` flag's
+source (`/etc/network/interfaces`) and tidy how a trunk vs. access port reads,
+so a Proxmox node's VLAN topology is fully legible. *Read-only* first, as with
+Docker.
+
+The shared-plumbing model note holds throughout: an 802.1q **VLAN**
+subinterface, a **veth** virtual cable, and a **bridge port's VLAN filtering**
+are three *different* kernel objects that share a "virtual" feel but each keep
+their own correct name — we do *not* rebrand one to another.
+
+## 0.6 — inbound firewall rules
+
+Per interface, read from `nft -j list ruleset` (fallback `iptables-save`).
+Display first; editing is a later, careful step.
+
+## 0.7 — scale and polish
 
 - Multiple hosts open at once (tabs), copy a config box *between hosts*
 - Canvas search/filter for machines with many interfaces
