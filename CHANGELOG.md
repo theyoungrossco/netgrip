@@ -33,6 +33,13 @@ adheres to [Semantic Versioning](https://semver.org/).
 - A container `veth` no longer mis-reports its peer as a host interface (e.g.
   `eth0`): the peer resolver now respects network namespaces, so a cross-netns
   ifindex that happens to collide with a host interface's is left unpaired.
+- **The window now shows the NetGrip monogram, not a generic network glyph.**
+  The icon is bundled inside the package (`netgrip/resources/`) and set on the
+  application, so it appears however netgrip is launched — including straight
+  from the venv's `bin/netgrip` with no desktop integration installed — instead
+  of the previous hardcoded freedesktop `network-wired` fallback. That same SVG
+  is now the single source the Linux installer and the Windows `.ico` generator
+  read from.
 
 ### Changed
 

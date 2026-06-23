@@ -60,6 +60,7 @@ from netgrip.core.runner import (
 )
 from netgrip.core.sshhosts import ssh_config_hosts
 from netgrip.ui import theme
+from netgrip.ui.branding import app_icon
 from netgrip.ui.canvas import Canvas
 from netgrip.ui.dialogs import (
     CONFIRM_CANCEL,
@@ -120,7 +121,7 @@ class MainWindow(QMainWindow):
     def __init__(self, initial_host: str | None = None, demo: bool = False):
         super().__init__()
         self.setWindowTitle("NetGrip")
-        self.setWindowIcon(QIcon.fromTheme("network-wired"))
+        self.setWindowIcon(app_icon())
         self.resize(1100, 720)
 
         # Windows has no managed localhost: start unconnected and let the user

@@ -26,7 +26,7 @@ Suggested install locations:
 |---|---|
 | `data/io.github.theyoungrossco.netgrip.desktop` | `/usr/share/applications/` |
 | `data/io.github.theyoungrossco.netgrip.metainfo.xml` | `/usr/share/metainfo/` |
-| `data/icons/io.github.theyoungrossco.netgrip.svg` | `/usr/share/icons/hicolor/scalable/apps/` |
+| `src/netgrip/resources/io.github.theyoungrossco.netgrip.svg` | `/usr/share/icons/hicolor/scalable/apps/` |
 
 ## Debian plan
 
