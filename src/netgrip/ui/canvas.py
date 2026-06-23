@@ -13,12 +13,14 @@ from netgrip.core.model import HostState
 from netgrip.ui import theme
 from netgrip.ui.items import (
     BaseNode,
+    ContainerNode,
     DraftVlanNode,
     Edge,
     GroupNode,
     IpGroup,
     IpNode,
     NicNode,
+    PortEdge,
     RegionNode,
     SystemDns,
     VlanNode,
@@ -196,6 +198,19 @@ class Canvas(QGraphicsView):
             for dv in self._draft_vlans
         ]
 
+        # Docker containers: one box per container, joined to the bridge of each
+        # docker network it's on (the bridge already shows from the iproute2
+        # probe; apply_docker tagged it with its network name). Published ports
+        # are drawn as dashed PortEdges to the host uplink, after layout.
+        bridge_for_net = {n.name: n.bridge for n in state.docker_networks}
+        container_nodes = [ContainerNode(c) for c in state.containers]
+        container_edges: list[tuple[str, str]] = []
+        for node in container_nodes:
+            for net in node.container.networks:
+                bridge = bridge_for_net.get(net)
+                if bridge in shown_names:
+                    container_edges.append((if_nodes[bridge].key, node.key))
+
         # Topology graph for the auto-layout. These are exactly the same
         # relationships drawn as edges below (vlan->parent, member->master,
         # veth peer<->peer, interface->IP groups), built once so the layout
@@ -204,6 +219,8 @@ class Canvas(QGraphicsView):
         node_by_key: dict[str, BaseNode] = {n.key: n for n in if_nodes.values()}
         for group in ip_groups:
             node_by_key[group.key] = group
+        for node in container_nodes:
+            node_by_key[node.key] = node
 
         graph_edges: list[tuple[str, str]] = []
         for iface in shown:
@@ -216,6 +233,7 @@ class Canvas(QGraphicsView):
                 graph_edges.append((key, if_nodes[iface.peer].key))
         for group in ip_groups:
             graph_edges.append((if_nodes[group.iface.name].key, group.key))
+        graph_edges.extend(container_edges)
 
         # Physical NICs seed the left column; everything flows rightward from
         # them. The priority order (physical first, loopback last, then by name)
@@ -229,8 +247,10 @@ class Canvas(QGraphicsView):
         for iface in ranked:
             priority.append(if_nodes[iface.name].key)
             priority.extend(g.key for g in groups_by_iface[iface.name])
+        priority.extend(n.key for n in container_nodes)
 
-        for node in [*if_nodes.values(), *ip_nodes, *draft_nodes, *draft_vlan_nodes]:
+        for node in [*if_nodes.values(), *ip_nodes, *draft_nodes, *draft_vlan_nodes,
+                     *container_nodes]:
             scene.addItem(node)
             node.drag_finished.connect(self._make_drop_handler(node))
             node.drag_finished.connect(self._save_state)
@@ -272,6 +292,10 @@ class Canvas(QGraphicsView):
         boxes += [
             layout.Box(g.key, g.block_width(), g.block_height()) for g in ip_groups
         ]
+        boxes += [
+            layout.Box(n.key, n.boundingRect().width(), n.boundingRect().height())
+            for n in container_nodes
+        ]
         placement = layout.solve(
             boxes, graph_edges, sources, priority,
             margin_x=MARGIN, margin_y=start_y, col_gap=COL_GAP, row_gap=V_GAP,
@@ -296,7 +320,7 @@ class Canvas(QGraphicsView):
         # Remembered positions win over the automatic layout; members moving
         # makes their group reflow around them. _positions is intact here
         # because the saver was muted through the auto pass above.
-        remembered = [*if_nodes.values(), *ip_nodes]
+        remembered = [*if_nodes.values(), *ip_nodes, *container_nodes]
         for node in remembered:
             if node.key in self._positions:
                 node.setPos(self._positions[node.key])
@@ -308,12 +332,29 @@ class Canvas(QGraphicsView):
         for group in ip_groups:
             group.refresh()
 
+        # Published ports as dashed, labelled connectors from each container to
+        # the host's uplink (the default-route link); fall back to a bridge the
+        # container is on when there's no identifiable uplink. Drawn after layout
+        # so they don't pull the container columns toward the uplink.
+        uplink = state.uplink()
+        uplink_node = if_nodes.get(uplink.name) if uplink else None
+        for node in container_nodes:
+            if not node.container.ports:
+                continue
+            anchor = uplink_node or self._first_bridge_node(
+                node.container, bridge_for_net, if_nodes, shown_names
+            )
+            if anchor is None or anchor is node:
+                continue
+            label = ", ".join(p.label() for p in node.container.ports)
+            scene.addItem(PortEdge(node, anchor, label))
+
         # The DNS frame wraps the finished diagram, so fit it last — after every
         # node (including remembered positions) has settled.
         if dns_node is not None:
             content = QRectF()
             for node in [*if_nodes.values(), *ip_nodes, *ip_groups,
-                         *draft_nodes, *draft_vlan_nodes]:
+                         *draft_nodes, *draft_vlan_nodes, *container_nodes]:
                 content = content.united(node.sceneBoundingRect())
             dns_node.wrap(content)
 
@@ -324,6 +365,16 @@ class Canvas(QGraphicsView):
         self._positions.clear()
         self._save_state()
         self.populate(self._state)
+
+    @staticmethod
+    def _first_bridge_node(container, bridge_for_net, if_nodes, shown_names):
+        """The node of the first shown bridge ``container`` is on — the fallback
+        anchor for its published-port connector when there's no host uplink."""
+        for net in container.networks:
+            bridge = bridge_for_net.get(net)
+            if bridge in shown_names:
+                return if_nodes[bridge]
+        return None
 
     # ------------------------------------------------------------------ #
     # persisted state (drafts, positions, box names) — see core/store.py

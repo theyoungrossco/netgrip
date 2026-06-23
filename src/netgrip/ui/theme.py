@@ -43,6 +43,7 @@ _LIGHT = {
     "region4": ("#eaf4e5", "#3f8a44"),
     "region6": ("#f1ebfa", "#6d51a8"),
     "dns": ("#eceef0", "#7a828a"),
+    "container": ("#e3e7f8", "#5a63c0"),
 }
 _DARK = {
     "background": "#1e2228",
@@ -62,6 +63,7 @@ _DARK = {
     "region4": ("#1a2618", "#5fae5f"),
     "region6": ("#221d33", "#9b86cf"),
     "dns": ("#2a2e34", "#828b94"),
+    "container": ("#272b41", "#828ce0"),
 }
 
 # Legend / glossary categories in display order: (label, colour key, hint,
@@ -83,6 +85,9 @@ LEGEND_CATEGORIES = [
      "An IPv6 address with its gateway and DNS on an interface.", "protocol"),
     ("System DNS", "dns",
      "The host's name resolvers and DNS search domains.", "dns"),
+    ("Container", "container",
+     "A Docker container on a bridge network; a dashed line marks published ports.",
+     "container"),
     ("Loopback", "loopback",
      "The host-internal interface (127.0.0.1 / ::1).", "loopback"),
 ]

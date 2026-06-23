@@ -6,6 +6,18 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **Docker visibility** (0.4, read-only): a `docker0` / `br-…` bridge is now
+  labelled with its **docker network** name, and each running **container** is
+  drawn as its own box on the bridge network(s) it joins, showing its **image**,
+  its **IP per network** and its **compose project / service**. **Published
+  ports** draw as a dashed, labelled connector from the container to the host's
+  uplink (`:8080→80/tcp`), so it's clear that only certain ports traverse from
+  the host in (and which host IP they bind). Read best-effort via `docker network
+  inspect` / `docker inspect`, so a host without docker — or without daemon
+  access — is unaffected. See [docs/0.4-PLAN.md](docs/0.4-PLAN.md).
+
 ### Changed
 
 - **New app icon** — an "N" monogram with four coloured nodes — replacing the

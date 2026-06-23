@@ -11,7 +11,7 @@ from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainterPath, QPen
 from PySide6.QtWidgets import QApplication, QGraphicsItem, QGraphicsObject, QGraphicsPathItem
 
 from netgrip.core.actions import BOND_MODES
-from netgrip.core.model import Address, Interface
+from netgrip.core.model import Address, Container, Interface
 from netgrip.ui import glyphs, theme
 
 PAD = 9.0
@@ -233,6 +233,8 @@ class GroupNode(BaseNode):
             lines.append(iface.kind)
         if iface.kind == "bridge" and iface.bridge_vlan_aware:
             lines.append("vlan-aware")
+        if iface.docker_network:
+            lines.append(f"docker: {iface.docker_network}")
         body, border = theme.node("group")
         super().__init__(iface.name, lines, body, border)
         self.iface = iface
@@ -279,6 +281,33 @@ class DraftVlanNode(BaseNode):
     def _paint_extra(self, painter) -> None:
         # No status dot (it doesn't exist yet); the tag glyph hugs the corner.
         self._paint_corner_glyph(painter, "vlan", beside_dot=False)
+
+
+class ContainerNode(BaseNode):
+    """A Docker container, drawn on the bridge network(s) it joins.
+
+    Shows its image, its compose project/service when composed, and its IP on
+    each network. Read-only for now (no menu); published ports are drawn as a
+    dashed :class:`PortEdge` to the host's uplink, not listed here.
+    """
+
+    def __init__(self, container: Container):
+        self.container = container
+        lines: list[str] = []
+        if container.image:
+            lines.append(container.image)
+        if container.composed:
+            lines.append(f"compose: {container.compose_project}/"
+                         f"{container.compose_service or '?'}")
+        for net, ip in container.networks.items():
+            lines.append(f"{net}  {ip}")
+        body, border = theme.node("container")
+        super().__init__(container.name, lines, body, border)
+        self.key = f"container:{container.id or container.name}"
+
+    def _paint_extra(self, painter) -> None:
+        self._paint_status_dot(painter, self.container.state == "running")
+        self._paint_corner_glyph(painter, "container")
 
 
 def ip_key(parent_name: str, cidr: str) -> str:
@@ -754,3 +783,51 @@ class Edge(QGraphicsPathItem):
         path = QPainterPath(self._a.anchor())
         path.lineTo(self._b.anchor())
         self.setPath(path)
+
+
+class PortEdge(QGraphicsPathItem):
+    """A dashed line carrying a label at its midpoint: a container's published
+    ports, from the container to the host's uplink. Dashed (and labelled) so it
+    reads as "only these ports traverse", distinct from the solid membership
+    cables."""
+
+    def __init__(self, a: BaseNode, b: BaseNode, label: str):
+        super().__init__()
+        self.setZValue(0)
+        pen = QPen(theme.edge(), 1.2)
+        pen.setStyle(Qt.PenStyle.DashLine)
+        self.setPen(pen)
+        self._a = a
+        self._b = b
+        self._label = label
+        base = QApplication.font()
+        self._font = QFont(base)
+        self._font.setPointSizeF(max(7.0, base.pointSizeF() - 1.5))
+        a.moved.connect(self.refresh)
+        b.moved.connect(self.refresh)
+        self.refresh()
+
+    def refresh(self) -> None:
+        path = QPainterPath(self._a.anchor())
+        path.lineTo(self._b.anchor())
+        self.setPath(path)
+
+    def boundingRect(self) -> QRectF:
+        # Room around the line for the midpoint label chip.
+        return super().boundingRect().adjusted(-MAX_TEXT_W / 2, -14, MAX_TEXT_W / 2, 14)
+
+    def paint(self, painter, option, widget=None) -> None:
+        super().paint(painter, option, widget)
+        if not self._label:
+            return
+        mid = (self._a.anchor() + self._b.anchor()) / 2
+        painter.setFont(self._font)
+        fm = QFontMetricsF(self._font)
+        text = fm.elidedText(self._label, Qt.TextElideMode.ElideRight, MAX_TEXT_W)
+        w = fm.horizontalAdvance(text)
+        chip = QRectF(mid.x() - w / 2 - 4, mid.y() - fm.height() / 2 - 1, w + 8, fm.height() + 2)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(theme.background())  # blank the line behind the text
+        painter.drawRoundedRect(chip, 3, 3)
+        painter.setPen(QPen(theme.text_dim()))
+        painter.drawText(QPointF(mid.x() - w / 2, mid.y() + fm.ascent() - fm.height() / 2), text)

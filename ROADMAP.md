@@ -75,38 +75,42 @@ have landed.
 ## 0.4 — visibility: containers, virtualization & firewall
 
 This is where NetGrip earns its keep. A Proxmox node or Docker host has dozens
-of `veth`s and bridges whose relationships are invisible today: a `veth` shows
-as a stray NIC, and a vlan-aware bridge shows no tags, so the canvas is a flat
-mesh of unconnected boxes. The job here is *read-only* clarity first — show what
-connects to what — before any editing.
+of `veth`s and bridges whose relationships are invisible today, so the canvas
+reads as a flat mesh of unconnected boxes. The job here is *read-only* clarity
+first — show what connects to what — before any editing.
 
-This starts with a small model change: generalize the current VLAN-specific
-parent/child plumbing (`Interface.vlan_parent` / `vlan_id`, the parent→child
-`Edge`) into a shared **"virtual interface on a parent link"** concept that
-`veth` peers and bridge-VLAN ports reuse, rather than special-casing each kind.
-Note these are three *different* kernel objects, not one to be merged: an 802.1q
-**VLAN** subinterface (a tagged child of one parent), a **veth** (a two-ended
-virtual cable, usually host-bridge ↔ container), and a **bridge port's VLAN
-filtering** (PVID + tagged list on a vlan-aware bridge). They share plumbing and
-a "virtual" feel, but each keeps its own correct name — we do *not* rebrand VLAN
-to veth.
+Two of the original 0.4 foundations already landed in 0.3 and unblock the rest:
+**veth pairs draw as a single shared cable** (peer matched from
+`ip -d -json link`) and **vlan-aware bridge ports show their PVID + tagged
+lists**. What remains:
 
-- **veth pairs as first-class links.** A `veth` is a virtual cable with two
-  ends, not a NIC. Pair the two ends (peer ifindex from `ip -d -json link`, no
-  privilege needed) and draw them as a single edge, so a container's `veth`
-  visibly lands on its host bridge instead of floating free.
-- **Docker awareness:** label each `veth` with its container and **docker
-  network** name; show which **host ports a container forwards** (`docker
-  inspect` / `docker network inspect`; published ports cross-checked against
-  `iptables -t nat` / `nft`). Display-first; make alterable only where it
-  clearly makes sense.
-- **Proxmox / vlan-aware bridges:** read each bridge member port's
-  **tagged/untagged VLANs** (`bridge -json vlan show`: `pvid` = untagged,
-  `vlanlist` = tagged) and the `bridge-vlan-aware` flag (from
-  `/etc/network/interfaces`). Render a member as a port carrying its VLAN tags,
-  so a Proxmox node's VLAN topology is legible instead of a flat mesh.
+- **Docker awareness (first up).** Surface the container layer the host already
+  half-shows: a `docker0` / `br-…` bridge is just an unexplained bridge, and a
+  container's `veth` lands on it anonymously. Read it with `docker network
+  inspect` + `docker inspect` (best-effort, never fails the probe) and draw it
+  so it *makes sense*:
+  - each **bridge network** labelled with its docker network name;
+  - each **container** as its own box on the bridge(s) it joins, showing its
+    **IP per network** and its **compose project / service** (so "IPs per
+    composed container" is legible at a glance);
+  - **published ports** as a **dashed, labelled connector** from the container
+    to the host's uplink — `:8080→80/tcp` — so it's obvious that *only certain
+    ports traverse* from the host into the container, and which host IP they
+    bind. (Later: cross-check published ports against `iptables -t nat` / `nft`
+    rather than trusting docker's own view; pin each individual host `veth` to
+    its container, which needs a netns read; offer edits where they clearly make
+    sense. See [docs/0.4-PLAN.md](docs/0.4-PLAN.md).)
+- **Proxmox / vlan-aware bridges:** build on the port tags shipped in 0.3 — show
+  the `bridge-vlan-aware` flag's source (`/etc/network/interfaces`) and tidy how
+  a trunk vs. access port reads, so a Proxmox node's VLAN topology is fully
+  legible.
 - **Inbound firewall rules** per interface, read from `nft -j list ruleset`
   (fallback `iptables-save`). Display first; editing is a later, careful step.
+
+The shared-plumbing model note still holds: an 802.1q **VLAN** subinterface, a
+**veth** virtual cable, and a **bridge port's VLAN filtering** are three
+*different* kernel objects that share a "virtual" feel but each keep their own
+correct name — we do *not* rebrand one to another.
 
 ## 0.5 — scale and polish
 

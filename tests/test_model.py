@@ -110,3 +110,33 @@ def test_resolver_origin_traces_back_to_link_or_manual():
     assert state.resolver_origin("192.168.1.1") == "eth0"
     assert state.resolver_origin("1.1.1.1") == "manual"
     assert state.resolver_origin("9.9.9.9") == "system"
+
+
+def test_host_state_docker_helpers():
+    from netgrip.core.model import Container, DockerNetwork, HostState, PortMapping
+
+    state = HostState(
+        label="demo",
+        interfaces=[Interface(name="docker0", kind="bridge"),
+                    Interface(name="eth0", kind="physical",
+                              gateways={4: Gateway("192.168.1.1")})],
+        docker_networks=[DockerNetwork(name="bridge", bridge="docker0")],
+        containers=[
+            Container(name="a", networks={"bridge": "172.17.0.2"}),
+            Container(name="b", networks={"web": "172.18.0.2"}),
+        ],
+    )
+    assert state.docker_network("bridge").bridge == "docker0"
+    assert state.docker_network_for_bridge("docker0").name == "bridge"
+    assert state.docker_network_for_bridge("nope") is None
+    assert [c.name for c in state.containers_on("bridge")] == ["a"]
+    # The uplink is the link carrying the IPv4 default route.
+    assert state.uplink().name == "eth0"
+
+    # No default route anywhere -> no uplink.
+    bare = HostState(label="x", interfaces=[Interface(name="eth0")])
+    assert bare.uplink() is None
+
+    # PortMapping label: all-addresses bind drops the host IP; a pinned one keeps it.
+    assert PortMapping("0.0.0.0", 8080, 80, "tcp").label() == ":8080→80/tcp"
+    assert PortMapping("10.0.0.1", 5, 6, "udp").label() == "10.0.0.1:5→6/udp"

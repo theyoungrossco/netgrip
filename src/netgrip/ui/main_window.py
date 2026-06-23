@@ -29,16 +29,24 @@ from PySide6.QtWidgets import (
 import netgrip
 from netgrip.core import actions, persist, persist_link
 from netgrip.core.backends import Backend, detect_backend
-from netgrip.core.demo import DEMO_BACKEND, DEMO_DNS, DEMO_DNS_SEARCH, demo_interfaces
+from netgrip.core.demo import (
+    DEMO_BACKEND,
+    DEMO_DNS,
+    DEMO_DNS_SEARCH,
+    demo_docker,
+    demo_interfaces,
+)
 from netgrip.core.model import (
     GROUP_KINDS,
     Address,
+    Container,
+    DockerNetwork,
     Gateway,
     HostState,
     Interface,
     ip_family,
 )
-from netgrip.core.probe import apply_link_dns, probe, probe_dns
+from netgrip.core.probe import apply_docker, apply_link_dns, probe, probe_dns, probe_docker
 from netgrip.core.runner import (
     IS_WINDOWS,
     DemoRunner,
@@ -412,8 +420,12 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Select a host to connect over SSH.")
             return
         if isinstance(runner, DemoRunner):
-            self._set_state(demo_interfaces(), DEMO_DNS, DEMO_DNS_SEARCH,
-                            can_edit_dns=False, backend=DEMO_BACKEND)
+            interfaces = demo_interfaces()
+            docker_networks, containers = demo_docker()
+            apply_docker(interfaces, docker_networks)  # tag docker0 / br-… bridges
+            self._set_state(interfaces, DEMO_DNS, DEMO_DNS_SEARCH,
+                            can_edit_dns=False, backend=DEMO_BACKEND,
+                            docker_networks=docker_networks, containers=containers)
             return
         self._set_busy(True, f"Reading interfaces on {runner.label}…")
 
@@ -421,8 +433,10 @@ class MainWindow(QMainWindow):
             interfaces = probe(runner)
             servers, search, can_edit, per_link = probe_dns(runner)
             apply_link_dns(interfaces, per_link)  # per-link DNS onto each group
+            docker_networks, containers = probe_docker(runner)  # best-effort
+            apply_docker(interfaces, docker_networks)  # tag bridges with their net
             backend = detect_backend(runner)  # which subsystem owns persistent config
-            return interfaces, servers, search, can_edit, backend
+            return interfaces, servers, search, can_edit, backend, docker_networks, containers
 
         run_in_background(
             work,
@@ -502,11 +516,15 @@ class MainWindow(QMainWindow):
 
     def _set_state(self, interfaces: list[Interface], dns: list[str] | None = None,
                    dns_search: list[str] | None = None, can_edit_dns: bool = False,
-                   backend: Backend | None = None) -> None:
+                   backend: Backend | None = None,
+                   docker_networks: list[DockerNetwork] | None = None,
+                   containers: list[Container] | None = None) -> None:
         self.state = HostState(
             self.runner.label, interfaces,
             list(dns or []), list(dns_search or []), can_edit_dns,
             backend=backend,
+            docker_networks=list(docker_networks or []),
+            containers=list(containers or []),
         )
         # Re-attach any unsaved "→ DHCP" intents, dropping ones whose link or
         # static address is gone (already DHCP, or removed), so a stale pending
