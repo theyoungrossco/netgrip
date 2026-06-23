@@ -10,13 +10,22 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 - **Docker visibility** (0.4, read-only): a `docker0` / `br-…` bridge is now
   labelled with its **docker network** name, and each running **container** is
-  drawn as its own box on the bridge network(s) it joins, showing its **image**,
-  its **IP per network** and its **compose project / service**. **Published
-  ports** draw as a dashed, labelled connector from the container to the host's
-  uplink (`:8080→80/tcp`), so it's clear that only certain ports traverse from
-  the host in (and which host IP they bind). Read best-effort via `docker network
-  inspect` / `docker inspect`, so a host without docker — or without daemon
-  access — is unaffected. See [docs/0.4-PLAN.md](docs/0.4-PLAN.md).
+  drawn as a **single box** on the bridge network(s) it joins, showing its
+  **image**, its **IP per network** and its **compose project / service**. A
+  container's anonymous host-side `veth` is **folded into that box** rather than
+  drawn beside it. **Published ports** draw as a dashed connector from the
+  container to the host's uplink (so it's clear only certain ports traverse from
+  the host in); its `:8080→80/tcp` label — and the bound host IP when it isn't
+  `0.0.0.0` — is revealed when either end is **selected**, to keep a busy host
+  readable. Read best-effort via `docker network inspect` / `docker inspect`, so
+  a host without docker — or without daemon access — is unaffected. See
+  [docs/0.4-PLAN.md](docs/0.4-PLAN.md).
+
+### Fixed
+
+- A container `veth` no longer mis-reports its peer as a host interface (e.g.
+  `eth0`): the peer resolver now respects network namespaces, so a cross-netns
+  ifindex that happens to collide with a host interface's is left unpaired.
 
 ### Changed
 

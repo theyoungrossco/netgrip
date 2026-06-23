@@ -130,6 +130,12 @@ class Canvas(QGraphicsView):
         if state is None:
             return
 
+        # A docker container's host-side veth is just the cable to its container;
+        # drawn on its own it's an anonymous box, one per container. Fold it away
+        # and let the container box (attached to the same bridge) stand for it, so
+        # there's one box per container rather than a veth box beside it.
+        docker_bridges = {n.bridge for n in state.docker_networks if n.bridge}
+
         # Loopback has its own toggle (show_loopback); every other interface can
         # be filtered out when down via hide_offline. Drafts are added later, so
         # they're never affected by either.
@@ -137,6 +143,7 @@ class Canvas(QGraphicsView):
             i for i in state.interfaces
             if (self._show_loopback or i.kind != "loopback")
             and not (self._hide_offline and not i.is_up and i.kind != "loopback")
+            and not (i.kind == "veth" and i.master in docker_bridges)
         ]
         shown_names = {i.name for i in shown}
 

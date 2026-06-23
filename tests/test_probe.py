@@ -91,10 +91,11 @@ FIXTURE = [
         "operstate": "UP", "link_type": "ether", "address": "52:54:00:77:88:02",
         "linkinfo": {"info_kind": "veth"}, "addr_info": [],
     },
-    # A veth whose peer lives in another namespace (a container): only an
-    # ifindex we can't resolve locally, so it is left unpaired.
+    # A veth whose peer lives in another namespace (a container): the peer
+    # ifindex is given with a link_netnsid, and here it deliberately collides
+    # with eth0's ifindex (2) — the resolver must NOT mis-pair it to eth0.
     {
-        "ifindex": 8, "ifname": "vethC", "link_index": 4242,
+        "ifindex": 8, "ifname": "vethC", "link_index": 2, "link_netnsid": 0,
         "flags": ["BROADCAST", "MULTICAST", "UP", "LOWER_UP"], "mtu": 1500,
         "operstate": "UP", "link_type": "ether", "address": "52:54:00:77:88:03",
         "linkinfo": {"info_kind": "veth"}, "addr_info": [],
@@ -147,10 +148,13 @@ def test_veth_peers_resolve_both_ends():
 
 
 def test_veth_peer_in_other_namespace_is_unpaired():
-    # The container case: the far end isn't a local interface, so no peer.
-    vethc = {i.name: i for i in parse_addr_json(FIXTURE)}["vethC"]
+    # The container case: the far end is in another netns (link_netnsid set), so
+    # its ifindex must not resolve — even though it collides with eth0's (2).
+    ifaces = {i.name: i for i in parse_addr_json(FIXTURE)}
+    vethc = ifaces["vethC"]
     assert vethc.kind == "veth"
     assert vethc.peer is None
+    assert ifaces["eth0"].index == 2  # the index vethC's peer collides with
 
 
 def test_bond_and_member():

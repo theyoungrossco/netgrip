@@ -400,9 +400,13 @@ def parse_addr_json(payload: list[dict]) -> list[Interface]:
     interfaces: list[Interface] = []
     # A veth's other end comes from IFLA_LINK: iproute2 reports it as a name
     # ("link") when the peer is in this namespace, or only as an ifindex
-    # ("link_index") when it lives in another (e.g. a container). Stash both
-    # and resolve to a name once every link has been read.
-    veth_peers: dict[str, tuple[str | None, int | None]] = {}
+    # ("link_index") when it lives in another (e.g. a container). A peer in
+    # another namespace also carries "link_netnsid"; its ifindex is meaningful
+    # only in *that* namespace, so it must never be matched against our own
+    # ifindexes (a container's eth0 ifindex routinely collides with a host
+    # interface's, which would mis-pair every container veth to, say, eth0).
+    # Stash all three and resolve once every link has been read.
+    veth_peers: dict[str, tuple[str | None, int | None, int | None]] = {}
     for item in payload:
         linkinfo = item.get("linkinfo") or {}
         info_data = linkinfo.get("info_data") or {}
@@ -427,7 +431,9 @@ def parse_addr_json(payload: list[dict]) -> list[Interface]:
             bridge_vlan_aware=bool(info_data.get("vlan_filtering")) if kind == "bridge" else False,
         )
         if kind == "veth":
-            veth_peers[iface.name] = (item.get("link"), item.get("link_index"))
+            veth_peers[iface.name] = (
+                item.get("link"), item.get("link_index"), item.get("link_netnsid")
+            )
 
         for ai in item.get("addr_info", []):
             family = 4 if ai.get("family") == "inet" else 6
@@ -449,15 +455,18 @@ def parse_addr_json(payload: list[dict]) -> list[Interface]:
         interfaces.append(iface)
 
     # Resolve veth peers now that every interface is known. Prefer the name the
-    # kernel gave us; otherwise map the peer ifindex to a local interface. A
-    # peer in another namespace resolves to neither and is left unpaired.
+    # kernel gave us; otherwise map the peer ifindex to a local interface, but
+    # only when the peer is in *our* namespace (no link_netnsid) — a cross-netns
+    # ifindex would otherwise mis-pair a container's veth to a host interface. A
+    # peer in another namespace (a container) resolves to neither and stays
+    # unpaired; its docker container, not the bare veth, is what we draw.
     by_index = {i.index: i for i in interfaces}
     names = {i.name for i in interfaces}
     for iface in interfaces:
-        link_name, link_index = veth_peers.get(iface.name, (None, None))
+        link_name, link_index, netnsid = veth_peers.get(iface.name, (None, None, None))
         if link_name in names:
             iface.peer = link_name
-        elif link_index in by_index:
+        elif netnsid is None and link_index in by_index:
             iface.peer = by_index[link_index].name
     return interfaces
 

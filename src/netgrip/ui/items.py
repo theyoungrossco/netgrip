@@ -28,6 +28,7 @@ class BaseNode(QGraphicsObject):
 
     moved = Signal()
     drag_finished = Signal()
+    selected_changed = Signal()  # selection toggled (a PortEdge reveals its label)
 
     def __init__(self, title: str, lines: list[str], body: QColor, border: QColor,
                  dashed: bool = False):
@@ -120,6 +121,8 @@ class BaseNode(QGraphicsObject):
     def itemChange(self, change, value):
         if change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged:
             self.moved.emit()
+        elif change == QGraphicsItem.GraphicsItemChange.ItemSelectedHasChanged:
+            self.selected_changed.emit()
         return super().itemChange(change, value)
 
     def mousePressEvent(self, event) -> None:
@@ -786,10 +789,11 @@ class Edge(QGraphicsPathItem):
 
 
 class PortEdge(QGraphicsPathItem):
-    """A dashed line carrying a label at its midpoint: a container's published
-    ports, from the container to the host's uplink. Dashed (and labelled) so it
-    reads as "only these ports traverse", distinct from the solid membership
-    cables."""
+    """A dashed line for a container's published ports, from the container to the
+    host's uplink. Dashed so it reads as "only these ports traverse", distinct
+    from the solid membership cables. Its port label is hidden by default (a
+    busy host has many of these) and revealed only while either end box is
+    selected."""
 
     def __init__(self, a: BaseNode, b: BaseNode, label: str):
         super().__init__()
@@ -805,6 +809,9 @@ class PortEdge(QGraphicsPathItem):
         self._font.setPointSizeF(max(7.0, base.pointSizeF() - 1.5))
         a.moved.connect(self.refresh)
         b.moved.connect(self.refresh)
+        # Reveal / hide the label as either end is selected.
+        a.selected_changed.connect(self.update)
+        b.selected_changed.connect(self.update)
         self.refresh()
 
     def refresh(self) -> None:
@@ -818,7 +825,9 @@ class PortEdge(QGraphicsPathItem):
 
     def paint(self, painter, option, widget=None) -> None:
         super().paint(painter, option, widget)
-        if not self._label:
+        # Only label the line while an endpoint is selected — otherwise a host
+        # with many published ports turns into a wall of text.
+        if not self._label or not (self._a.isSelected() or self._b.isSelected()):
             return
         mid = (self._a.anchor() + self._b.anchor()) / 2
         painter.setFont(self._font)
