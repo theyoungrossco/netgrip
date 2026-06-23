@@ -7,7 +7,7 @@
 **Visual, drag-and-drop network interface management for Linux.**
 
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/License-GPL--3.0--or--later-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.3.0-informational.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.4.0-informational.svg)](CHANGELOG.md)
 [![Python](https://img.shields.io/badge/python-%E2%89%A5%203.10-blue.svg)](pyproject.toml)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20(SSH)-lightgrey.svg)](#installing)
 [![Status: alpha](https://img.shields.io/badge/status-alpha-orange.svg)](#status)

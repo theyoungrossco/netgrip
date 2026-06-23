@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "netgrip"
-version = "0.3.0"
+version = "0.4.0"
 description = "Visual, drag-and-drop network interface manager for Linux"
 readme = "README.md"
 requires-python = ">=3.10"
