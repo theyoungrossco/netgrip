@@ -110,8 +110,11 @@ def sudo_needs_password(stderr: str) -> bool:
 
 def sudo_auth_failed(message: str) -> bool:
     """True when a privileged run failed because the cached sudo password was
-    wrong, so the UI can clear it and re-prompt rather than loop on a bad one."""
-    return "incorrect password" in message.lower()
+    wrong, so the UI can clear it and re-prompt rather than loop on a bad one.
+    Covers local sudo ("N incorrect password attempt(s)") and ``sudo -S`` over
+    SSH, which rejects the piped password with "Sorry, try again"."""
+    lowered = message.lower()
+    return "incorrect password" in lowered or "sorry, try again" in lowered
 
 
 # Env var the askpass helper echoes, shared by the ssh and the local-sudo paths.
@@ -314,7 +317,9 @@ class SSHRunner(Runner):
         self.label = host
         self.hostkey_policy = hostkey_policy
         self._password: str | None = None
+        self._sudo_password: str | None = None
         self._remote_uid: int | None = None
+        self._sudo_passwordless: bool | None = None  # cached `sudo -n` probe result
 
     def set_password(self, password: str | None) -> None:
         """Use `password` for login (None reverts to key/agent-only, BatchMode)."""
@@ -324,6 +329,36 @@ class SSHRunner(Runner):
     def had_password(self) -> bool:
         """True if a password is already in use (so a fresh failure is a retry)."""
         return self._password is not None
+
+    def set_sudo_password(self, password: str | None) -> None:
+        """Cache (or, with None, forget) the *remote sudo* password for this
+        session — separate from the SSH login password. Used with ``sudo -S`` so
+        a host that requires a password for sudo can be managed without a tty."""
+        self._sudo_password = password or None
+
+    def had_sudo_password(self) -> bool:
+        return self._sudo_password is not None
+
+    def escalation_status(self) -> str:
+        """How root can be reached on the remote host without prompting per
+        action: ``"ready"`` (root login, passwordless sudo, or a cached sudo
+        password), ``"needs_password"`` (a sudoer who must supply a password), or
+        ``"unavailable"`` (not a sudoer / no sudo). Mirrors
+        :meth:`LocalRunner.escalation_status` so the UI can prompt once, up front,
+        instead of letting a privileged run fail."""
+        try:
+            if self._remote_is_root():
+                return "ready"
+        except CommandError:
+            return "unavailable"  # can't even probe identity (connection/auth)
+        if self._sudo_password is not None or self._sudo_passwordless:
+            return "ready"
+        try:
+            self._run_remote("sudo -n true")
+        except CommandError as exc:
+            return "needs_password" if sudo_needs_password(exc.stderr) else "unavailable"
+        self._sudo_passwordless = True
+        return "ready"
 
     def _ssh_argv(self, remote_command: str) -> list[str]:
         # With a password we must let ssh prompt (BatchMode would suppress it);
@@ -383,12 +418,19 @@ class SSHRunner(Runner):
             **_POPEN_EXTRA,
         )
 
-    def _run_remote(self, remote_command: str, *, timeout: int = READ_TIMEOUT) -> str:
+    def _run_remote(self, remote_command: str, *, timeout: int = READ_TIMEOUT,
+                    stdin_text: str | None = None) -> str:
         argv = self._ssh_argv(remote_command)
+        # ssh forwards our stdin to the remote command, so `stdin_text` is how a
+        # remote `sudo -S` receives its password. With no stdin_text we close
+        # stdin (DEVNULL) as before. Login auth never uses stdin — it goes through
+        # the SSH_ASKPASS helper — so the two passwords don't collide.
+        stdin_kwargs = (
+            {"input": stdin_text} if stdin_text is not None else {"stdin": subprocess.DEVNULL}
+        )
         try:
             proc = subprocess.run(
                 argv,
-                stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
                 timeout=timeout,
@@ -396,6 +438,7 @@ class SSHRunner(Runner):
                 # Detach from any controlling terminal so ssh asks the askpass
                 # helper for the password instead of trying to read a tty.
                 start_new_session=self._password is not None,
+                **stdin_kwargs,
                 **_POPEN_EXTRA,
             )
         except FileNotFoundError as exc:
@@ -422,8 +465,17 @@ class SSHRunner(Runner):
         script = batch_script(commands)
         if self._remote_is_root():
             return self._run_remote(script, timeout=WRITE_TIMEOUT)
-        # -n: never prompt. An interactive password prompt cannot work through
-        # BatchMode ssh, so passwordless sudo (or root login) is required.
+        if self._sudo_password is not None:
+            # -S reads the password from stdin (no tty needed); -p '' silences the
+            # prompt text. The password reaches sudo only through the SSH channel's
+            # stdin — never the command line, the remote env, or disk.
+            remote = "sudo -S -p '' sh -c " + shlex.quote(script)
+            return self._run_remote(
+                remote, timeout=WRITE_TIMEOUT, stdin_text=self._sudo_password + "\n"
+            )
+        # No cached sudo password: try passwordless. -n never prompts (an
+        # interactive prompt can't work through ssh), so this needs passwordless
+        # sudo or root login; otherwise the UI prompts for a password and retries.
         return self._run_remote("sudo -n sh -c " + shlex.quote(script), timeout=WRITE_TIMEOUT)
 
 

@@ -93,6 +93,22 @@ def test_runtime_only_when_nothing_manages():
     assert backend.kind == RUNTIME
     assert backend.persists is False
     assert backend.manages_config is False
+    assert backend.install_ifupdown2 is False
+
+
+def test_runtime_offers_ifupdown2_when_classic_ifupdown_on_apt():
+    # Classic ifupdown (interfaces file, no ifreload) on an apt host: runtime
+    # only, but installing ifupdown2 would make it writable — the UI offers it.
+    backend = parse_backend(_output(ifupdown="hasfile\nhasapt"))
+    assert backend.kind == RUNTIME
+    assert backend.install_ifupdown2 is True
+    assert "ifupdown2" in backend.summary
+
+
+def test_runtime_no_ifupdown2_offer_without_apt():
+    # An interfaces file but no apt (or no interfaces file): nothing to one-click.
+    assert parse_backend(_output(ifupdown="hasfile")).install_ifupdown2 is False
+    assert parse_backend(_output(ifupdown="hasapt")).install_ifupdown2 is False
 
 
 def test_runtime_only_when_systemctl_missing():

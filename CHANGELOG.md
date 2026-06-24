@@ -6,6 +6,37 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-06-24
+
+A maintenance release between milestones: remote hosts that need a sudo
+password are now manageable, runtime-only ifupdown boxes can gain a persistence
+backend in one click, and the canvas exports to SVG/PDF.
+
+### Added
+
+- **Enable persistence on a runtime-only host, in one click**: when NetGrip
+  detects a Debian/Proxmox box running classic **ifupdown** (an
+  `/etc/network/interfaces` file, but no `ifreload`) on an `apt` host, the
+  status-bar **Persist** indicator becomes clickable. Clicking it installs
+  **ifupdown2** through the normal confirm → elevate → run → re-probe flow; the
+  re-probe then re-detects the backend, so the indicator flips from *Runtime
+  only* to *ifupdown* and **Save** starts persisting — no shell required.
+- **Remote sudo password over SSH**: privileged actions on a host that requires
+  a password for `sudo` now prompt for it (once, cached for the session) and run
+  via `sudo -S`, with the password sent only over the SSH channel's stdin —
+  never the command line, the remote environment, or disk. Previously a remote
+  host needed root login or passwordless sudo, so managing a password-sudo box
+  from a client without a local `sudo` (e.g. Windows) failed silently with no
+  prompt. Root login and passwordless sudo still work unchanged.
+- **Export diagram** (`File ▸ Export diagram…`): save the canvas — exactly as
+  shown, every visible box, line and glyph in its on-screen colour over the
+  themed background — to a vector **SVG** or **PDF**. SVG is sized to the
+  content (1:1, infinitely scalable); PDF is a standard **US Letter** page
+  (oriented to suit the diagram) with the topology scaled to fit, so it prints
+  without fuss. The **legend**, when shown, is placed in its own reserved
+  column so it never overlaps the diagram, and a small **NetGrip monogram** is
+  pinned bottom-right — giving you an at-a-glance network document for free.
+
 ## [0.4.0] - 2026-06-23
 
 **0.4 — Docker visibility**, a milestone scoped to a single feature: make the
@@ -169,7 +200,8 @@ First release.
   invalid input is reported inline (no stacked dialogs)
 - Demo mode (`netgrip --demo`)
 
-[Unreleased]: https://github.com/theyoungrossco/netgrip/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/theyoungrossco/netgrip/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/theyoungrossco/netgrip/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/theyoungrossco/netgrip/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/theyoungrossco/netgrip/compare/v0.1.0...v0.3.0
 [0.1.0]: https://github.com/theyoungrossco/netgrip/releases/tag/v0.1.0

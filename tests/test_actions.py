@@ -6,6 +6,19 @@ from netgrip.core import actions
 from netgrip.core.model import Address, Interface
 
 
+def test_install_ifupdown2_updates_then_installs_noninteractively():
+    plan = actions.plan_install_ifupdown2()
+    assert plan[0] == ["apt-get", "update"]
+    # Installed non-interactively (no tty under the single sudo/ssh batch) via an
+    # `env` prefix that survives as one argv, and with -y to skip the prompt.
+    install = plan[-1]
+    assert install[:2] == ["env", "DEBIAN_FRONTEND=noninteractive"]
+    assert install[2:5] == ["apt-get", "install", "-y"]
+    assert install[-1] == "ifupdown2"
+    # Not a link change, so it must not be charged to any link's unsaved state.
+    assert actions.affected_links(plan) == set()
+
+
 def test_try_applies_forward_and_arms_detached_revert():
     forward = [["ip", "address", "add", "192.168.1.10/24", "dev", "eth1"]]
     revert = [["ip", "address", "del", "192.168.1.10/24", "dev", "eth1"]]

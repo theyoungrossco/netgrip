@@ -203,6 +203,7 @@ def test_sudo_message_classifiers():
     assert runner_mod.sudo_needs_password("sudo: a terminal is required to read the password")
     assert not runner_mod.sudo_needs_password("user is not in the sudoers file")
     assert runner_mod.sudo_auth_failed("sudo: 3 incorrect password attempts")
+    assert runner_mod.sudo_auth_failed("Sorry, try again.")  # sudo -S over SSH
     assert not runner_mod.sudo_auth_failed("Cannot assign requested address")
 
 
@@ -265,3 +266,97 @@ def test_local_non_sudoer_falls_back_to_pkexec(monkeypatch):
 def test_local_escalation_unavailable_without_sudo_or_pkexec(monkeypatch):
     runner = _local_runner(monkeypatch, sudo_rc=1, which=(), display=False)
     assert runner.escalation_status() == "unavailable"
+
+
+# -- remote (SSH) escalation / sudo password over the wire ------------------ #
+
+def _fake_ssh(monkeypatch, respond):
+    """An SSHRunner whose `_run_remote` is stubbed by ``respond(remote_command)``
+    (returning stdout or raising CommandError), so escalation and the sudo
+    write-through are exercised without a real ssh. Returns the runner and a list
+    of (remote_command, stdin_text) calls for assertions."""
+    runner = SSHRunner("admin@10.0.0.1")
+    calls = []
+
+    def fake(remote_command, *, timeout=runner_mod.READ_TIMEOUT, stdin_text=None):
+        calls.append((remote_command, stdin_text))
+        return respond(remote_command)
+
+    monkeypatch.setattr(runner, "_run_remote", fake)
+    return runner, calls
+
+
+def _ssh_responder(uid="1000", sudo_n=None):
+    """Build a responder: `id -u` returns ``uid``; `sudo -n true` succeeds unless
+    ``sudo_n`` is an exception to raise; anything else (the script) returns ''."""
+    def respond(cmd):
+        if cmd == "id -u":
+            return uid
+        if cmd == "sudo -n true":
+            if sudo_n is not None:
+                raise sudo_n
+            return ""
+        return ""
+    return respond
+
+
+def test_ssh_root_login_is_ready(monkeypatch):
+    runner, _ = _fake_ssh(monkeypatch, _ssh_responder(uid="0"))
+    assert runner.escalation_status() == "ready"
+
+
+def test_ssh_passwordless_sudo_is_ready_and_cached(monkeypatch):
+    runner, calls = _fake_ssh(monkeypatch, _ssh_responder())
+    assert runner.escalation_status() == "ready"
+    calls.clear()
+    # Cached: a second check re-probes neither identity nor `sudo -n true`.
+    assert runner.escalation_status() == "ready"
+    assert calls == []
+
+
+def test_ssh_needs_password_then_caches_and_clears(monkeypatch):
+    needs = CommandError("sudo -n true", 1, "sudo: a password is required")
+    runner, _ = _fake_ssh(monkeypatch, _ssh_responder(sudo_n=needs))
+    assert runner.escalation_status() == "needs_password"
+    assert not runner.had_sudo_password()
+
+    runner.set_sudo_password("hunter2")
+    assert runner.had_sudo_password()
+    assert runner.escalation_status() == "ready"
+
+    runner.set_sudo_password(None)  # a wrong password is cleared -> prompt again
+    assert runner.escalation_status() == "needs_password"
+
+
+def test_ssh_non_sudoer_is_unavailable(monkeypatch):
+    nope = CommandError("sudo -n true", 1, "admin is not in the sudoers file")
+    runner, _ = _fake_ssh(monkeypatch, _ssh_responder(sudo_n=nope))
+    assert runner.escalation_status() == "unavailable"
+
+
+def test_ssh_privileged_pipes_sudo_password_via_stdin(monkeypatch):
+    runner, calls = _fake_ssh(monkeypatch, _ssh_responder())
+    runner.set_sudo_password("hunter2")
+    runner.run_privileged([["ip", "link", "set", "eth0", "up"]])
+    remote, stdin_text = calls[-1]
+    assert remote.startswith("sudo -S -p '' sh -c ")
+    assert "ip link set eth0 up" in remote
+    # The password travels only on stdin, never in the command line.
+    assert stdin_text == "hunter2\n"
+    assert "hunter2" not in remote
+
+
+def test_ssh_privileged_as_root_runs_without_sudo(monkeypatch):
+    runner, calls = _fake_ssh(monkeypatch, _ssh_responder(uid="0"))
+    runner.run_privileged([["ip", "link", "set", "eth0", "up"]])
+    remote, stdin_text = calls[-1]
+    assert remote == "ip link set eth0 up"
+    assert stdin_text is None
+
+
+def test_ssh_privileged_without_password_uses_sudo_n(monkeypatch):
+    runner, calls = _fake_ssh(monkeypatch, _ssh_responder())
+    runner.run_privileged([["ip", "link", "set", "eth0", "up"]])
+    remote, stdin_text = calls[-1]
+    assert remote.startswith("sudo -n sh -c ")
+    assert stdin_text is None

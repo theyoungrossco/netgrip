@@ -54,6 +54,11 @@ DETECT_COMMAND = [
     f"echo {_IFUPDOWN}; systemctl is-active networking 2>/dev/null; "
     "test -f /etc/network/interfaces && echo hasfile; "
     "command -v ifreload >/dev/null 2>&1 && echo ifreload; "
+    # apt: on a runtime-only Debian/Proxmox host that already has classic
+    # ifupdown (an interfaces file) but no ifreload, `apt-get install ifupdown2`
+    # is a one-click fix that hands the host a persistence backend. Note whether
+    # apt is even here so the UI only offers it where it can work.
+    "command -v apt-get >/dev/null 2>&1 && echo hasapt; "
     "exit 0",
 ]
 
@@ -67,10 +72,14 @@ class Backend:
     config manager is in charge (NetworkManager / systemd-networkd / netplan),
     false for a pure-runtime host where there is nowhere to write. ``summary``
     is a one-line, user-facing description for the indicator / its tooltip.
+    ``install_ifupdown2`` flags a runtime-only host where installing ifupdown2
+    would turn the existing classic ifupdown into a writable backend, so the UI
+    can offer that as a one-click remediation.
     """
 
     kind: str
     summary: str = ""
+    install_ifupdown2: bool = False
 
     @property
     def label(self) -> str:
@@ -144,11 +153,21 @@ def parse_backend(text: str) -> Backend:
             "Configured by ifupdown (/etc/network/interfaces). Save writes a "
             "drop-in under /etc/network/interfaces.d and runs ifreload.",
         )
-    return Backend(
-        RUNTIME,
+    # Runtime only. If classic ifupdown is here (an interfaces file) on an apt
+    # host, it is just missing ifreload — installing ifupdown2 makes it a
+    # writable backend, which the UI offers as a one-click fix.
+    ifupdown_lines = {line.strip() for line in sections.get(_IFUPDOWN, "").splitlines()}
+    can_install = "hasfile" in ifupdown_lines and "hasapt" in ifupdown_lines
+    summary = (
         "No persistent network manager detected — changes live only in the "
-        "running kernel and are lost on reboot.",
+        "running kernel and are lost on reboot."
     )
+    if can_install:
+        summary += (
+            " This host has classic ifupdown; installing ifupdown2 would let "
+            "NetGrip Save through it."
+        )
+    return Backend(RUNTIME, summary, install_ifupdown2=can_install)
 
 
 def _split_sections(text: str) -> dict[str, str]:
