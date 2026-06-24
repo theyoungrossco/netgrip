@@ -32,6 +32,18 @@
   </provides>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.4.1" date="2026-06-24">
+      <description>
+        <p>A maintenance release between milestones. Privileged actions on a
+        remote host that requires a sudo password now prompt for it once, cached
+        for the session, and run via sudo -S with the password sent only over the
+        SSH channel's stdin — so a password-sudo box is manageable from a client
+        without local sudo, such as Windows. A runtime-only Debian/Proxmox host
+        with classic ifupdown can install ifupdown2 in one click, turning it into
+        a backend Save can write through. And the canvas exports to a vector SVG
+        (content-sized) or a US Letter PDF via File, Export diagram.</p>
+      </description>
+    </release>
     <release version="0.4.0" date="2026-06-23">
       <description>
         <p>Docker visibility, read-only. A docker bridge is labelled by its

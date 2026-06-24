@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-06-24
+
+A maintenance release between milestones: remote hosts that need a sudo
+password are now manageable, runtime-only ifupdown boxes can gain a persistence
+backend in one click, and the canvas exports to SVG/PDF.
+
 ### Added
 
 - **Enable persistence on a runtime-only host, in one click**: when NetGrip
@@ -194,7 +200,8 @@ First release.
   invalid input is reported inline (no stacked dialogs)
 - Demo mode (`netgrip --demo`)
 
-[Unreleased]: https://github.com/theyoungrossco/netgrip/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/theyoungrossco/netgrip/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/theyoungrossco/netgrip/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/theyoungrossco/netgrip/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/theyoungrossco/netgrip/compare/v0.1.0...v0.3.0
 [0.1.0]: https://github.com/theyoungrossco/netgrip/releases/tag/v0.1.0
