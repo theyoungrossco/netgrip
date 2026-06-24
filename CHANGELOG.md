@@ -6,6 +6,20 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-06-24
+
+A packaging fix for the Windows build.
+
+### Fixed
+
+- **Windows app icon**: the running app's window and taskbar icon showed a
+  generic network glyph instead of the NetGrip monogram. The PyInstaller build
+  wasn't bundling the monogram SVG that `app_icon()` loads via
+  `importlib.resources`, so it fell back to the themed `network-wired` icon.
+  The frozen app now ships `netgrip.resources`, so the monogram appears. (The
+  installer/shortcut `.ico` was already correct; a stale Windows icon cache
+  from a prior install can still show the old shortcut icon until rebuilt.)
+
 ## [0.4.1] - 2026-06-24
 
 A maintenance release between milestones: remote hosts that need a sudo
@@ -200,7 +214,8 @@ First release.
   invalid input is reported inline (no stacked dialogs)
 - Demo mode (`netgrip --demo`)
 
-[Unreleased]: https://github.com/theyoungrossco/netgrip/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/theyoungrossco/netgrip/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/theyoungrossco/netgrip/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/theyoungrossco/netgrip/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/theyoungrossco/netgrip/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/theyoungrossco/netgrip/compare/v0.1.0...v0.3.0

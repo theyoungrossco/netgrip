@@ -32,6 +32,15 @@
   </provides>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.4.2" date="2026-06-24">
+      <description>
+        <p>A packaging fix for the Windows build: the running app's window and
+        taskbar icon showed a generic network glyph because the frozen app
+        wasn't bundling the NetGrip monogram SVG. The monogram now ships, so it
+        appears correctly. Other platforms and the installer icon are
+        unaffected.</p>
+      </description>
+    </release>
     <release version="0.4.1" date="2026-06-24">
       <description>
         <p>A maintenance release between milestones. Privileged actions on a
