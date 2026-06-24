@@ -12,8 +12,15 @@
 
 from pathlib import Path
 
+from PyInstaller.utils.hooks import collect_data_files
+
 ROOT = Path(SPECPATH).resolve().parent.parent  # installer/windows -> repo root
 ICON = str(ROOT / "data" / "icons" / "netgrip.ico")
+
+# Bundle non-Python package data. branding.app_icon() reads the monogram SVG via
+# importlib.resources from netgrip.resources; without this it's missing from the
+# frozen app and the window/taskbar icon falls back to a generic network glyph.
+DATAS = collect_data_files("netgrip.resources")
 
 # Heavy Qt modules NetGrip doesn't use. QtSvg is deliberately NOT here.
 EXCLUDES = [
@@ -32,7 +39,7 @@ a = Analysis(
     [str(ROOT / "installer" / "windows" / "launcher.py")],
     pathex=[str(ROOT / "src")],
     binaries=[],
-    datas=[],
+    datas=DATAS,
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
