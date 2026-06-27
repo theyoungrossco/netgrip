@@ -318,7 +318,7 @@ class ContainerNode(BaseNode):
             lines.append(f"compose: {container.compose_project}/"
                          f"{container.compose_service or '?'}")
         if container.network_mode == "host":
-            lines.append("network: host")
+            lines.append("host's network")
         for net, ip in container.networks.items():
             lines.append(f"{net}  {ip}")
         body, border = theme.node("container")
