@@ -153,6 +153,14 @@ def _vlan_summary(iface: Interface) -> str | None:
     return None
 
 
+def _fmt_bytes(n: int) -> str:
+    """Human-readable byte count: three significant digits, largest fitting unit."""
+    for unit, divisor in (("GB", 1_000_000_000), ("MB", 1_000_000), ("KB", 1_000)):
+        if n >= divisor:
+            return f"{n / divisor:.1f} {unit}"
+    return f"{n} B"
+
+
 def _iface_detail(iface: Interface) -> list[str]:
     # Gateway and DNS no longer live here: they belong to the per-family IP
     # group (see IpGroup), since that's the protocol that hands them out.
@@ -172,6 +180,8 @@ def _iface_detail(iface: Interface) -> list[str]:
     summary = _vlan_summary(iface)
     if summary:
         lines.append(summary)
+    if iface.rx_bytes or iface.tx_bytes:
+        lines.append(f"rx {_fmt_bytes(iface.rx_bytes)}  tx {_fmt_bytes(iface.tx_bytes)}")
     return lines
 
 
@@ -205,22 +215,33 @@ def ipgroup_detail(iface: Interface, family: int,
     return lines
 
 
+def _nic_theme_key(kind: str) -> str:
+    if kind == "loopback":
+        return "loopback"
+    if kind == "wireguard":
+        return "wireguard"
+    return "nic"
+
+
 class NicNode(BaseNode):
     """A network interface card (or other plain link, incl. loopback)."""
 
     def __init__(self, iface: Interface):
-        body, border = theme.node("loopback" if iface.kind == "loopback" else "nic")
+        body, border = theme.node(_nic_theme_key(iface.kind))
         super().__init__(iface.name, _iface_detail(iface), body, border)
         self.iface = iface
         self.key = f"if:{iface.name}"
 
     def _paint_extra(self, painter) -> None:
         self._paint_status_dot(painter, self.iface.is_up)
-        # Physical NICs carry a wired/wireless glyph; loopback its loop mark.
+        # Physical NICs carry a wired/wireless glyph; loopback its loop mark;
+        # WireGuard tunnels get a padlock to mark them as encrypted links.
         if self.iface.kind == "physical":
             self._paint_corner_glyph(painter, "wireless" if self.iface.wireless else "wired")
         elif self.iface.kind == "loopback":
             self._paint_corner_glyph(painter, "loopback")
+        elif self.iface.kind == "wireguard":
+            self._paint_corner_glyph(painter, "tunnel")
 
 
 class GroupNode(BaseNode):
