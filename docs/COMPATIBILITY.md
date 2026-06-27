@@ -79,9 +79,21 @@ Reads (`probe`) run unprivileged; only the mutating batch escalates — confirme
 
 ## Tier 3 — full VMs (QEMU/KVM, real kernel + SSH)
 
-_In progress._ Containers cannot reach: a **different kernel**, NetGrip's
-**SSHRunner** path, `pkexec`, and `systemd-resolved` per-link DNS. VMs of
-selected distros (booted from cloud images, driven over SSH) cover these.
+Containers can't reach a **different kernel**, NetGrip's **SSHRunner** path, or
+**`systemd-resolved` per-link DNS**. Two cloud-image VMs (QEMU/KVM), driven over
+SSH from the host with NetGrip's own `SSHRunner`, cover these. Each ran:
+escalation classification, probe, address (v4+v6), VLAN and gateway plans applied
+*remotely*, and DNS read — all through `SSHRunner` + remote `sudo -n`.
+
+| VM | Kernel | iproute2 | Result |
+|---|---|---|---|
+| Debian 12 (cloud) | 6.1.0 | 6.1.0 | ✅ 6/6 |
+| Arch Linux (cloud) | 7.0.12 | 7.0.0 | ✅ 6/6 |
+
+Both confirmed `resolvectl=yes` with correct **per-link DNS** parsing
+(`resolvectl dns`/`domain` → `{link: [servers]}`) — the systemd-resolved path
+that has no container equivalent. Remote escalation (`sudo -n` over SSH),
+remote-applied address/VLAN/gateway plans, and re-probe all matched the model.
 
 ## Findings
 
@@ -105,6 +117,14 @@ selected distros (booted from cloud images, driven over SSH) cover these.
    (e.g. the `python3.11` module) — with which AlmaLinux 8 passes 12/12. This is
    an existing, documented requirement, not a regression.
 
+4. **The SSH + escalation + per-link DNS path works on a real, different
+   kernel.** Against a live Arch VM (kernel 7.0.12, newer than the 6.1 host) and
+   a Debian VM, `SSHRunner` read/probe, remote `sudo -n` escalation, remotely
+   applied address/VLAN/gateway plans, and `resolvectl` per-link DNS parsing all
+   succeeded — the surfaces with no container equivalent.
+
 ---
-_Method/harness lives outside the repo (host lab volume); this document records
-the findings. Re-runnable; results above reflect the latest sweep._
+_Method/harness lives outside the repo (host lab volume `/mnt/lab/harness`); this
+document records the findings. Re-runnable; results above reflect the latest sweep.
+Summary: **16 distros (iproute2 ss200127→7.1.0) + local sudo escalation + 2 VMs
+over SSH — all green**, one BusyBox UX note (Finding 2)._
