@@ -118,10 +118,27 @@ remote-applied address/VLAN/gateway plans, and re-probe all matched the model.
    an existing, documented requirement, not a regression.
 
 4. **The SSH + escalation + per-link DNS path works on a real, different
-   kernel.** Against a live Arch VM (kernel 7.0.12, newer than the 6.1 host) and
-   a Debian VM, `SSHRunner` read/probe, remote `sudo -n` escalation, remotely
+   kernel.** Against a live Arch VM running kernel **7.0.12** (newer than the
+   6.1 host) — `SSHRunner` read/probe, remote `sudo -n` escalation, remotely
    applied address/VLAN/gateway plans, and `resolvectl` per-link DNS parsing all
-   succeeded — the surfaces with no container equivalent.
+   succeeded. The Debian VM (kernel 6.1, matching the host) corroborated the same
+   path; the *different-kernel* evidence rests on Arch.
+
+## Not yet exercised (scope of the green above)
+
+These surfaces are out of scope for this sweep — the "all green" applies to what
+was tested, not these:
+
+- **`pkexec` (polkit) escalation** — the GUI fallback in `LocalRunner` needs a
+  desktop session (polkit + `DISPLAY`); only the `sudo -n`, `sudo -A`, and
+  sudo-over-SSH paths were run.
+- **Persistence / Save backends** (`systemd-networkd`, `netplan`, `ifupdown2`,
+  `plan_write_file`) — only *runtime* mutations were tested. The Save
+  write-through is the most distro-divergent surface after parsing and deserves
+  its own pass.
+- **Wireless and Docker enrichment as positive cases** — only their silent
+  *degradation* (absent) was confirmed; no Wi-Fi NIC or live Docker daemon was
+  presented to assert the parsed values.
 
 ---
 _Method/harness lives outside the repo (host lab volume `/mnt/lab/harness`); this
