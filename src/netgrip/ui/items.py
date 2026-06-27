@@ -153,6 +153,14 @@ def _vlan_summary(iface: Interface) -> str | None:
     return None
 
 
+def _fmt_bytes(n: int) -> str:
+    """Human-readable byte count: three significant digits, largest fitting unit."""
+    for unit, divisor in (("GB", 1_000_000_000), ("MB", 1_000_000), ("KB", 1_000)):
+        if n >= divisor:
+            return f"{n / divisor:.1f} {unit}"
+    return f"{n} B"
+
+
 def _iface_detail(iface: Interface) -> list[str]:
     # Gateway and DNS no longer live here: they belong to the per-family IP
     # group (see IpGroup), since that's the protocol that hands them out.
@@ -172,6 +180,8 @@ def _iface_detail(iface: Interface) -> list[str]:
     summary = _vlan_summary(iface)
     if summary:
         lines.append(summary)
+    if iface.rx_bytes or iface.tx_bytes:
+        lines.append(f"rx {_fmt_bytes(iface.rx_bytes)}  tx {_fmt_bytes(iface.tx_bytes)}")
     return lines
 
 

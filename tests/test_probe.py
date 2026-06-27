@@ -19,6 +19,7 @@ from netgrip.core.probe import (
     parse_resolv_conf,
     parse_resolvectl_links,
     parse_route_json,
+    parse_stats_json,
     parse_wireless,
     probe_dns,
     probe_docker,
@@ -510,3 +511,42 @@ def test_wireguard_no_mac():
     assert wg.mtu == 1420
     assert wg.is_up
     assert [a.cidr for a in wg.addresses_for(4)] == ["10.200.0.1/24"]
+
+
+# Trimmed `ip -s -j link show` output: one interface with stats64 (the common
+# 64-bit block) and one with only the older 32-bit stats block as a fallback.
+STATS_FIXTURE = [
+    {
+        "ifname": "eth0",
+        "stats64": {
+            "rx": {"bytes": 5_400_907_383, "packets": 3_928_098, "errors": 0},
+            "tx": {"bytes": 494_957_079, "packets": 1_251_283, "errors": 0},
+        },
+    },
+    {
+        "ifname": "lo",
+        "stats": {
+            "rx": {"bytes": 1_000, "packets": 10},
+            "tx": {"bytes": 1_000, "packets": 10},
+        },
+    },
+    {
+        "ifname": "wg0",
+        # No stats block at all: must yield zeros, not crash.
+    },
+]
+
+
+def test_parse_stats_json_reads_64bit_counters():
+    result = {name: (rx, tx) for name, rx, tx in parse_stats_json(STATS_FIXTURE)}
+    assert result["eth0"] == (5_400_907_383, 494_957_079)
+
+
+def test_parse_stats_json_falls_back_to_32bit():
+    result = {name: (rx, tx) for name, rx, tx in parse_stats_json(STATS_FIXTURE)}
+    assert result["lo"] == (1_000, 1_000)
+
+
+def test_parse_stats_json_missing_block_yields_zeros():
+    result = {name: (rx, tx) for name, rx, tx in parse_stats_json(STATS_FIXTURE)}
+    assert result["wg0"] == (0, 0)

@@ -39,3 +39,37 @@ session. The glyph shape and colour look are unconfirmed until Ross runs the dem
 from `ip -s -j link show` and surface them as a dim annotation on each NIC box.
 This is a genuinely experimental read path (the probe command changes) and a new
 UI annotation pattern, neither of which belongs on `dev` without more thought.
+
+### Session 2 — live RX/TX stats overlay
+
+**What**: A read-only enrichment pass that adds cumulative RX/TX byte counters
+to each interface box.
+
+Changes made:
+- `core/model.py`: `rx_bytes: int = 0` and `tx_bytes: int = 0` added to
+  `Interface`.
+- `core/probe.py`: `STATS_COMMAND` (`ip -s -j link show`), `parse_stats_json()`
+  (extracts per-link byte counts from `stats64`/`stats` blocks), and
+  `_enrich_stats()` (best-effort enrichment pass wired into `probe()`). A
+  failure here (old iproute2, remote host quirk) leaves the fields at zero and
+  never fails the rest of the probe.
+- `ui/items.py`: `_fmt_bytes()` helper and a dim annotation line
+  `rx N.N GB  tx N.N MB` appended by `_iface_detail()` when either counter is
+  nonzero. No new theme entries needed — detail lines inherit `text_dim()`
+  automatically from `BaseNode.paint`.
+- `core/demo.py`: Representative RX/TX values on `eth0`, `eth1`, `eth2`,
+  `bond0`, and `wg0` so the annotation is visible in `--demo` mode.
+- `tests/test_probe.py`: Three new tests for `parse_stats_json` (64-bit path,
+  32-bit fallback, missing block yields zeros).
+
+**What wasn't verified**: UI rendering — no display available in the unattended
+session. The annotation format and layout look reasonable but are unconfirmed
+until Ross runs the demo.
+
+**Next experiment idea**: a real-time refresh loop — poll `ip -s link show` on a
+timer (e.g. every 2 s) and update the stats annotation without a full re-probe.
+This would require a lightweight background worker that reads only stats and emits
+a signal to repaint the affected NicNode boxes, keeping the UI thread unblocked.
+Alternatively, try a per-box tooltip that shows the full stats block (errors,
+drops, packets) rather than a permanent annotation, to keep the canvas clean on
+busy hosts with many interfaces.

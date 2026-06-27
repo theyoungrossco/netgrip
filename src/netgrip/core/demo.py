@@ -55,14 +55,17 @@ def demo_interfaces() -> list[Interface]:
                 Address("192.168.1.11", 24, 4),  # a second v4: its own box in the group
                 Address("2001:db8:1::10", 64, 6),
             ],
+            rx_bytes=5_400_907_383, tx_bytes=494_957_079,
         ),
         Interface(
             name="eth1", index=3, kind="physical", state="up",
             mac="52:54:00:a1:b2:c4", mtu=1500, master="bond0",
+            rx_bytes=12_345_678, tx_bytes=8_901_234,
         ),
         Interface(
             name="eth2", index=4, kind="physical", state="up",
             mac="52:54:00:a1:b2:c5", mtu=1500, master="bond0",
+            rx_bytes=11_222_333, tx_bytes=7_654_321,
         ),
         Interface(
             name="bond0", index=5, kind="bond", state="up",
@@ -70,6 +73,7 @@ def demo_interfaces() -> list[Interface]:
             gateways={4: Gateway("10.0.0.1")},  # statically configured (not DHCP)
             dns=["9.9.9.9"],
             addresses=[Address("10.0.0.5", 24, 4)],
+            rx_bytes=23_567_011, tx_bytes=16_555_555,
         ),
         Interface(
             name="bond0.40", index=6, kind="vlan", state="up",
@@ -87,6 +91,7 @@ def demo_interfaces() -> list[Interface]:
             name="wg0", index=18, kind="wireguard", state="up",
             mtu=1420,
             addresses=[Address("10.200.0.1", 24, 4)],
+            rx_bytes=1_048_576, tx_bytes=786_432,
         ),
         # A veth pair, both ends in this namespace (as Proxmox's firewall
         # fwln/fwpr links appear): each names the other as its peer, drawn as a

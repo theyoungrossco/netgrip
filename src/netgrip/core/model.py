@@ -168,6 +168,10 @@ class Interface:
     dns_search: list[str] = field(default_factory=list)
     dns_dynamic: bool = False  # link DNS was handed out by DHCP / RA
     addresses: list[Address] = field(default_factory=list)
+    # Cumulative RX/TX counters from `ip -s link show` (bytes since last reset).
+    # Zero when stats weren't read (remote probe without -s) or counter is genuinely zero.
+    rx_bytes: int = 0
+    tx_bytes: int = 0
 
     @property
     def is_up(self) -> bool:
