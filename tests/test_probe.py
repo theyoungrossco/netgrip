@@ -19,6 +19,7 @@ from netgrip.core.probe import (
     parse_resolv_conf,
     parse_resolvectl_links,
     parse_route_json,
+    parse_stats_json,
     parse_wireless,
     probe_dns,
     probe_docker,
@@ -100,13 +101,24 @@ FIXTURE = [
         "operstate": "UP", "link_type": "ether", "address": "52:54:00:77:88:03",
         "linkinfo": {"info_kind": "veth"}, "addr_info": [],
     },
+    # A WireGuard tunnel. Real WireGuard interfaces have link_type "none" and
+    # NO "address" field at all — the probe must handle a missing MAC gracefully.
+    {
+        "ifindex": 9, "ifname": "wg0",
+        "flags": ["POINTOPOINT", "NOARP", "UP", "LOWER_UP"], "mtu": 1420,
+        "operstate": "UNKNOWN", "link_type": "none",
+        "linkinfo": {"info_kind": "wireguard"},
+        "addr_info": [
+            {"family": "inet", "local": "10.200.0.1", "prefixlen": 24, "scope": "global"},
+        ],
+    },
 ]
 
 
 def test_parses_all_interfaces():
     ifaces = parse_addr_json(FIXTURE)
     assert [i.name for i in ifaces] == [
-        "lo", "eth0", "eth0.100", "bond0", "eth1", "vethA", "vethB", "vethC",
+        "lo", "eth0", "eth0.100", "bond0", "eth1", "vethA", "vethB", "vethC", "wg0",
     ]
 
 
@@ -325,7 +337,8 @@ DOCKER_NETWORKS = [
 ]
 
 # Trimmed `docker inspect <containers>`: a composed web container publishing two
-# ports (v4+v6 on one of them), and an un-composed container with no ports.
+# ports (v4+v6 on one of them), an un-composed container with no ports, and a
+# host-network container (NetworkMode=host, no docker-assigned IPs).
 DOCKER_CONTAINERS = [
     {
         "Id": "b2c3d4e5f6a7b8c9d0e1",
@@ -337,6 +350,7 @@ DOCKER_CONTAINERS = [
                 "com.docker.compose.service": "web",
             },
         },
+        "HostConfig": {"NetworkMode": "web"},
         "State": {"Status": "running"},
         "NetworkSettings": {
             "Ports": {
@@ -354,10 +368,28 @@ DOCKER_CONTAINERS = [
         "Id": "c3d4e5f6a7b8c9d0e1f2",
         "Name": "/registry",
         "Config": {"Image": "registry:2", "Labels": {}},
+        "HostConfig": {"NetworkMode": "bridge"},
         "State": {"Status": "running"},
         "NetworkSettings": {
             "Ports": {},
             "Networks": {"bridge": {"IPAddress": "172.17.0.2"}},
+        },
+    },
+    {
+        "Id": "e5f6a7b8c9d0e1f2a3b4",
+        "Name": "/plex",
+        "Config": {
+            "Image": "lscr.io/linuxserver/plex:latest",
+            "Labels": {
+                "com.docker.compose.project": "plex",
+                "com.docker.compose.service": "plex",
+            },
+        },
+        "HostConfig": {"NetworkMode": "host"},
+        "State": {"Status": "running"},
+        "NetworkSettings": {
+            "Ports": {"32400/tcp": [{"HostIp": "0.0.0.0", "HostPort": "32400"}]},
+            "Networks": {"host": {"IPAddress": ""}},  # host-net: empty IP
         },
     },
 ]
@@ -386,6 +418,7 @@ def test_parse_docker_containers_labels_ip_and_ports():
     assert web.composed and web.compose_project == "shop"
     assert web.label() == "shop/web"
     assert web.networks == {"web": "172.18.0.2"}
+    assert web.network_mode == "web"
     # v4+v6 on the same publish collapse to one all-addresses mapping; the
     # pinned :443 keeps its host IP; the unpublished 9000 is dropped.
     labels = [p.label() for p in web.ports]
@@ -395,6 +428,30 @@ def test_parse_docker_containers_labels_ip_and_ports():
     assert not registry.composed
     assert registry.label() == "registry"
     assert registry.ports == []
+    assert registry.network_mode == "bridge"
+
+
+def test_parse_docker_containers_host_network_mode():
+    containers = parse_docker_containers(DOCKER_CONTAINERS)
+    plex = containers[2]
+    assert plex.name == "plex"
+    assert plex.network_mode == "host"
+    # Host-network containers have no docker-assigned IPs; the empty IPAddress
+    # is filtered out so networks stays empty.
+    assert plex.networks == {}
+    # Published ports are still captured.
+    assert len(plex.ports) == 1
+    assert plex.ports[0].host_port == 32400
+
+
+def test_interface_is_vm_tap():
+    from netgrip.core.model import Interface
+    tap = Interface(name="vnet0", kind="tun", master="br0")
+    assert tap.is_vm_tap
+    # A tun with no master (e.g. a VPN tunnel) is not a VM tap.
+    assert not Interface(name="tun0", kind="tun").is_vm_tap
+    # A physical NIC enslaved to a bridge is not a VM tap.
+    assert not Interface(name="eth0", kind="physical", master="br0").is_vm_tap
 
 
 def test_parse_port_bindings_dedupe_and_null():
@@ -436,9 +493,60 @@ class _NoDockerRunner:
 def test_probe_docker_reads_both():
     networks, containers = probe_docker(_DockerRunner())
     assert {n.name for n in networks} == {"bridge", "web", "hostnet"}
-    assert {c.name for c in containers} == {"shop-web-1", "registry"}
+    assert {c.name for c in containers} == {"shop-web-1", "registry", "plex"}
 
 
 def test_probe_docker_best_effort_when_absent():
     # No docker (or no daemon access): yields nothing, never raises.
     assert probe_docker(_NoDockerRunner()) == ([], [])
+
+
+def test_wireguard_no_mac():
+    # WireGuard interfaces have no "address" field in iproute2 JSON output
+    # (link_type is "none"). Parse must not crash and must produce empty mac.
+    ifaces = {i.name: i for i in parse_addr_json(FIXTURE)}
+    wg = ifaces["wg0"]
+    assert wg.kind == "wireguard"
+    assert wg.mac == ""
+    assert wg.mtu == 1420
+    assert wg.is_up
+    assert [a.cidr for a in wg.addresses_for(4)] == ["10.200.0.1/24"]
+
+
+# Trimmed `ip -s -j link show` output: one interface with stats64 (the common
+# 64-bit block) and one with only the older 32-bit stats block as a fallback.
+STATS_FIXTURE = [
+    {
+        "ifname": "eth0",
+        "stats64": {
+            "rx": {"bytes": 5_400_907_383, "packets": 3_928_098, "errors": 0},
+            "tx": {"bytes": 494_957_079, "packets": 1_251_283, "errors": 0},
+        },
+    },
+    {
+        "ifname": "lo",
+        "stats": {
+            "rx": {"bytes": 1_000, "packets": 10},
+            "tx": {"bytes": 1_000, "packets": 10},
+        },
+    },
+    {
+        "ifname": "wg0",
+        # No stats block at all: must yield zeros, not crash.
+    },
+]
+
+
+def test_parse_stats_json_reads_64bit_counters():
+    result = {name: (rx, tx) for name, rx, tx in parse_stats_json(STATS_FIXTURE)}
+    assert result["eth0"] == (5_400_907_383, 494_957_079)
+
+
+def test_parse_stats_json_falls_back_to_32bit():
+    result = {name: (rx, tx) for name, rx, tx in parse_stats_json(STATS_FIXTURE)}
+    assert result["lo"] == (1_000, 1_000)
+
+
+def test_parse_stats_json_missing_block_yields_zeros():
+    result = {name: (rx, tx) for name, rx, tx in parse_stats_json(STATS_FIXTURE)}
+    assert result["wg0"] == (0, 0)

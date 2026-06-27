@@ -79,6 +79,11 @@ _BRIDGE_NAME_OPT = "com.docker.network.bridge.name"
 # A published port key, "80/tcp" or just "80" (proto defaults to tcp).
 _PORT_KEY_RE = re.compile(r"^(\d+)(?:/(\w+))?$")
 
+# Per-interface RX/TX byte counters. `ip -s` extends the link output with a
+# `stats64` block (64-bit counters available since kernel 2.6.36); the older
+# 32-bit `stats` block is the fallback for rare cases where stats64 is absent.
+STATS_COMMAND = ["ip", "-s", "-j", "link", "show"]
+
 # Routing protocols that mean "the kernel/DHCP/RA put this here", not the user.
 _DYNAMIC_PROTOCOLS = {"dhcp", "ra", "redirect", "kernel"}
 
@@ -96,6 +101,7 @@ def probe(runner: Runner) -> list[Interface]:
     _enrich_gateways(runner, interfaces)
     _enrich_bridge_vlans(runner, interfaces)
     _enrich_wireless(runner, interfaces)
+    _enrich_stats(runner, interfaces)
     return interfaces
 
 
@@ -190,9 +196,46 @@ def _enrich_wireless(runner: Runner, interfaces: list[Interface]) -> None:
         iface.wireless = iface.name in wireless
 
 
+def _enrich_stats(runner: Runner, interfaces: list[Interface]) -> None:
+    """Populate rx_bytes/tx_bytes on each interface from `ip -s link show`.
+
+    Best-effort: a failure here (old iproute2, remote host quirk) leaves
+    rx_bytes/tx_bytes at zero and never fails the rest of the probe."""
+    try:
+        payload = json.loads(runner.run(STATS_COMMAND))
+    except (RuntimeError, ValueError):
+        return
+    if not isinstance(payload, list):
+        return
+    by_name = {i.name: i for i in interfaces}
+    for name, rx, tx in parse_stats_json(payload):
+        iface = by_name.get(name)
+        if iface is not None:
+            iface.rx_bytes = rx
+            iface.tx_bytes = tx
+
+
 def parse_wireless(text: str) -> set[str]:
     """Interface names with an 802.11 phy, one per line from `WIRELESS_COMMAND`."""
     return {line.strip() for line in text.splitlines() if line.strip()}
+
+
+def parse_stats_json(payload: list[dict]) -> list[tuple[str, int, int]]:
+    """Extract (ifname, rx_bytes, tx_bytes) from `ip -s -j link show` output.
+
+    Prefers the 64-bit ``stats64`` block; falls back to ``stats`` (32-bit) for
+    kernels that lack it. Returns zero for either counter when the block is absent.
+    """
+    result: list[tuple[str, int, int]] = []
+    for item in payload:
+        name = item.get("ifname")
+        if not name:
+            continue
+        stats = item.get("stats64") or item.get("stats") or {}
+        rx = int((stats.get("rx") or {}).get("bytes") or 0)
+        tx = int((stats.get("tx") or {}).get("bytes") or 0)
+        result.append((name, rx, tx))
+    return result
 
 
 def parse_bridge_vlan_json(payload: list[dict]) -> dict[str, tuple[int | None, list[str]]]:
@@ -304,6 +347,7 @@ def parse_docker_containers(payload: list[dict]) -> list[Container]:
             for net, data in (netsettings.get("Networks") or {}).items()
             if isinstance(data, dict)
         }
+        host_config = entry.get("HostConfig") or {}
         containers.append(Container(
             name=name,
             id=(entry.get("Id") or "")[:12],
@@ -313,6 +357,7 @@ def parse_docker_containers(payload: list[dict]) -> list[Container]:
             compose_service=labels.get(_COMPOSE_SERVICE, ""),
             networks={k: v for k, v in networks.items() if v},
             ports=parse_port_bindings(netsettings.get("Ports") or {}),
+            network_mode=(host_config.get("NetworkMode") or "").lower(),
         ))
     return containers
 

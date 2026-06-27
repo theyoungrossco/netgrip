@@ -55,14 +55,17 @@ def demo_interfaces() -> list[Interface]:
                 Address("192.168.1.11", 24, 4),  # a second v4: its own box in the group
                 Address("2001:db8:1::10", 64, 6),
             ],
+            rx_bytes=5_400_907_383, tx_bytes=494_957_079,
         ),
         Interface(
             name="eth1", index=3, kind="physical", state="up",
             mac="52:54:00:a1:b2:c4", mtu=1500, master="bond0",
+            rx_bytes=12_345_678, tx_bytes=8_901_234,
         ),
         Interface(
             name="eth2", index=4, kind="physical", state="up",
             mac="52:54:00:a1:b2:c5", mtu=1500, master="bond0",
+            rx_bytes=11_222_333, tx_bytes=7_654_321,
         ),
         Interface(
             name="bond0", index=5, kind="bond", state="up",
@@ -70,6 +73,7 @@ def demo_interfaces() -> list[Interface]:
             gateways={4: Gateway("10.0.0.1")},  # statically configured (not DHCP)
             dns=["9.9.9.9"],
             addresses=[Address("10.0.0.5", 24, 4)],
+            rx_bytes=23_567_011, tx_bytes=16_555_555,
         ),
         Interface(
             name="bond0.40", index=6, kind="vlan", state="up",
@@ -79,6 +83,15 @@ def demo_interfaces() -> list[Interface]:
         Interface(
             name="wlan0", index=7, kind="physical", state="down",
             mac="52:54:00:a1:b2:c6", mtu=1500, wireless=True,
+        ),
+        # A WireGuard VPN tunnel. Real WireGuard interfaces have no MAC address
+        # (link_type "none" in iproute2) and a reduced MTU to leave room for the
+        # WireGuard header. The tunnel IP is a dedicated VPN subnet.
+        Interface(
+            name="wg0", index=18, kind="wireguard", state="up",
+            mtu=1420,
+            addresses=[Address("10.200.0.1", 24, 4)],
+            rx_bytes=1_048_576, tx_bytes=786_432,
         ),
         # A veth pair, both ends in this namespace (as Proxmox's firewall
         # fwln/fwpr links appear): each names the other as its peer, drawn as a
@@ -155,6 +168,12 @@ def demo_docker() -> tuple[list[DockerNetwork], list[Container]]:
             name="registry", id="a1b2c3d4e5f6", image="registry:2",
             networks={"bridge": "172.17.0.2"},
             ports=[PortMapping("0.0.0.0", 5000, 5000, "tcp")],
+        ),
+        Container(
+            name="plex", id="d4e5f6a7b8c9", image="lscr.io/linuxserver/plex:latest",
+            compose_project="plex", compose_service="plex",
+            network_mode="host",
+            ports=[PortMapping("0.0.0.0", 32400, 32400, "tcp")],
         ),
         Container(
             name="shop-web-1", id="b2c3d4e5f6a7", image="nginx:1.27",
