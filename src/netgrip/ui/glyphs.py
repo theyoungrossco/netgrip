@@ -85,6 +85,13 @@ _BODIES: dict[str, str] = {
         '<path d="M20.5 12a8.5 8.5 0 1 1-8.5-8.5c2.4 0 4.66.95 6.36 2.6L20.5 8"/>'
         '<path d="M20.5 3.5v4.5h-4.5"/>'
     ),
+    # A padlock: WireGuard is a secure VPN tunnel — the lock marks it as
+    # encrypted and distinct from a plain virtual/physical NIC.
+    "tunnel": (
+        '<rect x="6" y="11" width="12" height="9" rx="1.5"/>'
+        '<path d="M9 11V8a3 3 0 0 1 6 0v3"/>'
+        '<circle cx="12" cy="16" r="1.2" fill="{c}" stroke="none"/>'
+    ),
 }
 
 # (glyph, colour name) -> renderer. Colour only changes on a light/dark switch,

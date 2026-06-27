@@ -80,6 +80,14 @@ def demo_interfaces() -> list[Interface]:
             name="wlan0", index=7, kind="physical", state="down",
             mac="52:54:00:a1:b2:c6", mtu=1500, wireless=True,
         ),
+        # A WireGuard VPN tunnel. Real WireGuard interfaces have no MAC address
+        # (link_type "none" in iproute2) and a reduced MTU to leave room for the
+        # WireGuard header. The tunnel IP is a dedicated VPN subnet.
+        Interface(
+            name="wg0", index=18, kind="wireguard", state="up",
+            mtu=1420,
+            addresses=[Address("10.200.0.1", 24, 4)],
+        ),
         # A veth pair, both ends in this namespace (as Proxmox's firewall
         # fwln/fwpr links appear): each names the other as its peer, drawn as a
         # single cable between them.

@@ -47,6 +47,7 @@ _LIGHT = {
     "region6": ("#f1ebfa", "#6d51a8"),
     "dns": ("#eceef0", "#7a828a"),
     "container": ("#e3e7f8", "#5a63c0"),
+    "wireguard": ("#e8edf8", "#3d5fa0"),
     "host_net": "#7c4fa8",  # solid purple for host-network container lines
 }
 _DARK = {
@@ -69,6 +70,7 @@ _DARK = {
     "region6": ("#221d33", "#9b86cf"),
     "dns": ("#2a2e34", "#828b94"),
     "container": ("#272b41", "#828ce0"),
+    "wireguard": ("#202840", "#6a8fd0"),
     "host_net": "#a06cd4",  # solid purple for host-network container lines
 }
 

@@ -100,13 +100,24 @@ FIXTURE = [
         "operstate": "UP", "link_type": "ether", "address": "52:54:00:77:88:03",
         "linkinfo": {"info_kind": "veth"}, "addr_info": [],
     },
+    # A WireGuard tunnel. Real WireGuard interfaces have link_type "none" and
+    # NO "address" field at all — the probe must handle a missing MAC gracefully.
+    {
+        "ifindex": 9, "ifname": "wg0",
+        "flags": ["POINTOPOINT", "NOARP", "UP", "LOWER_UP"], "mtu": 1420,
+        "operstate": "UNKNOWN", "link_type": "none",
+        "linkinfo": {"info_kind": "wireguard"},
+        "addr_info": [
+            {"family": "inet", "local": "10.200.0.1", "prefixlen": 24, "scope": "global"},
+        ],
+    },
 ]
 
 
 def test_parses_all_interfaces():
     ifaces = parse_addr_json(FIXTURE)
     assert [i.name for i in ifaces] == [
-        "lo", "eth0", "eth0.100", "bond0", "eth1", "vethA", "vethB", "vethC",
+        "lo", "eth0", "eth0.100", "bond0", "eth1", "vethA", "vethB", "vethC", "wg0",
     ]
 
 
@@ -487,3 +498,15 @@ def test_probe_docker_reads_both():
 def test_probe_docker_best_effort_when_absent():
     # No docker (or no daemon access): yields nothing, never raises.
     assert probe_docker(_NoDockerRunner()) == ([], [])
+
+
+def test_wireguard_no_mac():
+    # WireGuard interfaces have no "address" field in iproute2 JSON output
+    # (link_type is "none"). Parse must not crash and must produce empty mac.
+    ifaces = {i.name: i for i in parse_addr_json(FIXTURE)}
+    wg = ifaces["wg0"]
+    assert wg.kind == "wireguard"
+    assert wg.mac == ""
+    assert wg.mtu == 1420
+    assert wg.is_up
+    assert [a.cidr for a in wg.addresses_for(4)] == ["10.200.0.1/24"]
