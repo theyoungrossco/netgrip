@@ -6,8 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-27
+
 ### Added
 
+- **WireGuard interfaces**: WireGuard tunnel interfaces (kernel link kind
+  `wireguard`) are now recognised and drawn as virtual interfaces with their own
+  glyph, so a `wg0` appears on the canvas like any other link. (Display only —
+  peers and endpoints aren't shown yet.)
+- **Live interface throughput**: each interface box now shows live RX/TX byte
+  counters, read unprivileged from `ip -s -j link show`.
 - **Host-network containers**: containers running with `network_mode: host`
   (e.g. Plex) now show "host's network" in their box and connect to the host's
   uplink IPv4 group with a solid purple line — distinct from the grey member
@@ -233,7 +241,8 @@ First release.
   invalid input is reported inline (no stacked dialogs)
 - Demo mode (`netgrip --demo`)
 
-[Unreleased]: https://github.com/theyoungrossco/netgrip/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/theyoungrossco/netgrip/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/theyoungrossco/netgrip/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/theyoungrossco/netgrip/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/theyoungrossco/netgrip/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/theyoungrossco/netgrip/compare/v0.3.0...v0.4.0

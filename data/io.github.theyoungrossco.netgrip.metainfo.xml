@@ -32,6 +32,17 @@
   </provides>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.5.0" date="2026-06-27">
+      <description>
+        <p>Read-only WireGuard visibility and live throughput. WireGuard tunnel
+        interfaces are now recognised and drawn as virtual interfaces with their
+        own glyph, and every interface box shows live RX/TX byte counters read
+        unprivileged from ip -s. Host-network containers (network_mode: host)
+        now show "host's network" and link to the host's uplink; KVM/QEMU tap
+        ports are labelled "vm tap"; and empty docker bridges no longer appear
+        as disconnected floating islands on the canvas.</p>
+      </description>
+    </release>
     <release version="0.4.2" date="2026-06-24">
       <description>
         <p>A packaging fix for the Windows build: the running app's window and
