@@ -253,6 +253,12 @@ class Canvas(QGraphicsView):
         # and let the container box (attached to the same bridge) stand for it, so
         # there's one box per container rather than a veth box beside it.
         docker_bridges = {n.bridge for n in state.docker_networks if n.bridge}
+        # Docker bridges with no running containers (e.g. a compose project whose
+        # containers all use host networking) are pure noise — hide them.
+        empty_docker_bridges = {
+            n.bridge for n in state.docker_networks
+            if n.bridge and not state.containers_on(n.name)
+        }
 
         # Loopback has its own toggle (show_loopback); every other interface can
         # be filtered out when down via hide_offline. Drafts are added later, so
@@ -262,6 +268,7 @@ class Canvas(QGraphicsView):
             if (self._show_loopback or i.kind != "loopback")
             and not (self._hide_offline and not i.is_up and i.kind != "loopback")
             and not (i.kind == "veth" and i.master in docker_bridges)
+            and i.name not in empty_docker_bridges
         ]
         shown_names = {i.name for i in shown}
 
@@ -488,6 +495,11 @@ class Canvas(QGraphicsView):
         #    v4 default route. Suppressed when a forward already links this
         #    container to that same box, so the two never sit collinear.
         for node in container_nodes:
+            is_host_net = node.container.network_mode == "host"
+            # Host-network containers share the host's namespace directly — draw
+            # a solid purple line to the uplink IPv4 group instead of a bridge edge.
+            if is_host_net and container_anchor is not None:
+                scene.addItem(RouteEdge(node, container_anchor, kind="host_net"))
             forwards: dict[str, tuple[RegionNode, list]] = {}
             if self._show_forwards:
                 for port in node.container.ports:
@@ -501,7 +513,9 @@ class Canvas(QGraphicsView):
                 for grp, ports in forwards.values():
                     label = "\n".join(p.label() for p in ports)  # one forward per line
                     scene.addItem(RouteEdge(node, grp, label, kind="forward"))
-            if self._show_egress:
+            # Skip the generic egress line for host-net containers — the host_net
+            # edge already expresses "this container IS on the host's network".
+            if self._show_egress and not is_host_net:
                 egress = self._egress_anchor(
                     ip_groups, uplink, node.container, bridge_for_net, shown_names
                 )

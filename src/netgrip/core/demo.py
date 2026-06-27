@@ -157,6 +157,12 @@ def demo_docker() -> tuple[list[DockerNetwork], list[Container]]:
             ports=[PortMapping("0.0.0.0", 5000, 5000, "tcp")],
         ),
         Container(
+            name="plex", id="d4e5f6a7b8c9", image="lscr.io/linuxserver/plex:latest",
+            compose_project="plex", compose_service="plex",
+            network_mode="host",
+            ports=[PortMapping("0.0.0.0", 32400, 32400, "tcp")],
+        ),
+        Container(
             name="shop-web-1", id="b2c3d4e5f6a7", image="nginx:1.27",
             compose_project="shop", compose_service="web",
             networks={"web": "172.18.0.2"},

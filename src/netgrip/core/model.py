@@ -86,7 +86,9 @@ class Container:
     """A (running) Docker container, as seen from the host.
 
     ``networks`` maps a docker network name to this container's IP on it (bare,
-    no prefix). ``ports`` are its published host bindings (see PortMapping)."""
+    no prefix). ``ports`` are its published host bindings (see PortMapping).
+    ``network_mode`` is "host" when the container shares the host network
+    namespace directly (no bridge, no docker-assigned IP)."""
 
     name: str
     id: str = ""  # short id
@@ -96,6 +98,7 @@ class Container:
     compose_service: str = ""  # com.docker.compose.service label
     networks: dict[str, str] = field(default_factory=dict)
     ports: list[PortMapping] = field(default_factory=list)
+    network_mode: str = ""  # "host" when container shares the host network namespace
 
     @property
     def composed(self) -> bool:
@@ -173,6 +176,11 @@ class Interface:
     @property
     def is_group(self) -> bool:
         return self.kind in GROUP_KINDS
+
+    @property
+    def is_vm_tap(self) -> bool:
+        """True for a KVM/QEMU tap port: a tun device enslaved to a bridge."""
+        return self.kind == "tun" and self.master is not None
 
     def addresses_for(self, family: int) -> list[Address]:
         return [a for a in self.addresses if a.family == family]

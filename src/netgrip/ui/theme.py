@@ -47,6 +47,7 @@ _LIGHT = {
     "region6": ("#f1ebfa", "#6d51a8"),
     "dns": ("#eceef0", "#7a828a"),
     "container": ("#e3e7f8", "#5a63c0"),
+    "host_net": "#7c4fa8",  # solid purple for host-network container lines
 }
 _DARK = {
     "background": "#1e2228",
@@ -68,6 +69,7 @@ _DARK = {
     "region6": ("#221d33", "#9b86cf"),
     "dns": ("#2a2e34", "#828b94"),
     "container": ("#272b41", "#828ce0"),
+    "host_net": "#a06cd4",  # solid purple for host-network container lines
 }
 
 # Legend / glossary categories in display order: (label, colour key, hint,
@@ -110,6 +112,9 @@ LEGEND_LINES = [
     ("Default route (out)", "egress",
      "A container's always-on outbound path via the host's default route — no "
      "ports, so no numbers."),
+    ("Host network", "host_net",
+     "A container using host networking — it shares the host's network stack "
+     "directly rather than a bridge."),
 ]
 
 
@@ -187,6 +192,9 @@ def line_pen(kind: str) -> QPen:
     elif kind == "egress":
         pen = QPen(QColor(_table()["route_egress"]), 1.2)
         pen.setStyle(Qt.PenStyle.DotLine)
+    elif kind == "host_net":
+        pen = QPen(QColor(_table()["host_net"]), 1.8)
+        pen.setStyle(Qt.PenStyle.SolidLine)
     else:  # member
         pen = QPen(edge(), 1.4)
     return pen

@@ -166,7 +166,7 @@ def _iface_detail(iface: Interface) -> list[str]:
     if iface.master:
         lines.append(f"member of {iface.master}")
     if iface.kind not in ("physical", "loopback", "vlan", "bond", "bridge"):
-        lines.append(iface.kind)
+        lines.append("vm tap" if iface.is_vm_tap else iface.kind)
     if iface.peer:
         lines.append(f"peer {iface.peer}")
     summary = _vlan_summary(iface)
@@ -317,6 +317,8 @@ class ContainerNode(BaseNode):
         if container.composed:
             lines.append(f"compose: {container.compose_project}/"
                          f"{container.compose_service or '?'}")
+        if container.network_mode == "host":
+            lines.append("network: host")
         for net, ip in container.networks.items():
             lines.append(f"{net}  {ip}")
         body, border = theme.node("container")

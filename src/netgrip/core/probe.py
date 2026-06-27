@@ -304,6 +304,7 @@ def parse_docker_containers(payload: list[dict]) -> list[Container]:
             for net, data in (netsettings.get("Networks") or {}).items()
             if isinstance(data, dict)
         }
+        host_config = entry.get("HostConfig") or {}
         containers.append(Container(
             name=name,
             id=(entry.get("Id") or "")[:12],
@@ -313,6 +314,7 @@ def parse_docker_containers(payload: list[dict]) -> list[Container]:
             compose_service=labels.get(_COMPOSE_SERVICE, ""),
             networks={k: v for k, v in networks.items() if v},
             ports=parse_port_bindings(netsettings.get("Ports") or {}),
+            network_mode=(host_config.get("NetworkMode") or "").lower(),
         ))
     return containers
 

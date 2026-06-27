@@ -325,7 +325,8 @@ DOCKER_NETWORKS = [
 ]
 
 # Trimmed `docker inspect <containers>`: a composed web container publishing two
-# ports (v4+v6 on one of them), and an un-composed container with no ports.
+# ports (v4+v6 on one of them), an un-composed container with no ports, and a
+# host-network container (NetworkMode=host, no docker-assigned IPs).
 DOCKER_CONTAINERS = [
     {
         "Id": "b2c3d4e5f6a7b8c9d0e1",
@@ -337,6 +338,7 @@ DOCKER_CONTAINERS = [
                 "com.docker.compose.service": "web",
             },
         },
+        "HostConfig": {"NetworkMode": "web"},
         "State": {"Status": "running"},
         "NetworkSettings": {
             "Ports": {
@@ -354,10 +356,28 @@ DOCKER_CONTAINERS = [
         "Id": "c3d4e5f6a7b8c9d0e1f2",
         "Name": "/registry",
         "Config": {"Image": "registry:2", "Labels": {}},
+        "HostConfig": {"NetworkMode": "bridge"},
         "State": {"Status": "running"},
         "NetworkSettings": {
             "Ports": {},
             "Networks": {"bridge": {"IPAddress": "172.17.0.2"}},
+        },
+    },
+    {
+        "Id": "e5f6a7b8c9d0e1f2a3b4",
+        "Name": "/plex",
+        "Config": {
+            "Image": "lscr.io/linuxserver/plex:latest",
+            "Labels": {
+                "com.docker.compose.project": "plex",
+                "com.docker.compose.service": "plex",
+            },
+        },
+        "HostConfig": {"NetworkMode": "host"},
+        "State": {"Status": "running"},
+        "NetworkSettings": {
+            "Ports": {"32400/tcp": [{"HostIp": "0.0.0.0", "HostPort": "32400"}]},
+            "Networks": {"host": {"IPAddress": ""}},  # host-net: empty IP
         },
     },
 ]
@@ -386,6 +406,7 @@ def test_parse_docker_containers_labels_ip_and_ports():
     assert web.composed and web.compose_project == "shop"
     assert web.label() == "shop/web"
     assert web.networks == {"web": "172.18.0.2"}
+    assert web.network_mode == "web"
     # v4+v6 on the same publish collapse to one all-addresses mapping; the
     # pinned :443 keeps its host IP; the unpublished 9000 is dropped.
     labels = [p.label() for p in web.ports]
@@ -395,6 +416,30 @@ def test_parse_docker_containers_labels_ip_and_ports():
     assert not registry.composed
     assert registry.label() == "registry"
     assert registry.ports == []
+    assert registry.network_mode == "bridge"
+
+
+def test_parse_docker_containers_host_network_mode():
+    containers = parse_docker_containers(DOCKER_CONTAINERS)
+    plex = containers[2]
+    assert plex.name == "plex"
+    assert plex.network_mode == "host"
+    # Host-network containers have no docker-assigned IPs; the empty IPAddress
+    # is filtered out so networks stays empty.
+    assert plex.networks == {}
+    # Published ports are still captured.
+    assert len(plex.ports) == 1
+    assert plex.ports[0].host_port == 32400
+
+
+def test_interface_is_vm_tap():
+    from netgrip.core.model import Interface
+    tap = Interface(name="vnet0", kind="tun", master="br0")
+    assert tap.is_vm_tap
+    # A tun with no master (e.g. a VPN tunnel) is not a VM tap.
+    assert not Interface(name="tun0", kind="tun").is_vm_tap
+    # A physical NIC enslaved to a bridge is not a VM tap.
+    assert not Interface(name="eth0", kind="physical", master="br0").is_vm_tap
 
 
 def test_parse_port_bindings_dedupe_and_null():
@@ -436,7 +481,7 @@ class _NoDockerRunner:
 def test_probe_docker_reads_both():
     networks, containers = probe_docker(_DockerRunner())
     assert {n.name for n in networks} == {"bridge", "web", "hostnet"}
-    assert {c.name for c in containers} == {"shop-web-1", "registry"}
+    assert {c.name for c in containers} == {"shop-web-1", "registry", "plex"}
 
 
 def test_probe_docker_best_effort_when_absent():
