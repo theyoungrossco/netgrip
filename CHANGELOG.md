@@ -6,6 +6,25 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **Host-network containers**: containers running with `network_mode: host`
+  (e.g. Plex) now show "host's network" in their box and connect to the host's
+  uplink IPv4 group with a solid purple line — distinct from the grey member
+  cables and the dotted egress line. The generic egress line is suppressed for
+  these containers since the new line already expresses the relationship. A
+  "Host network" entry is added to the legend.
+- **VM tap label**: KVM/QEMU tap ports (a `tun` device enslaved to a bridge,
+  e.g. `vnet5`) now display "vm tap" instead of the raw kernel type "tun",
+  making their role legible without full hypervisor support.
+
+### Fixed
+
+- **Empty docker bridges hidden**: docker bridge interfaces with no running
+  containers (e.g. a compose project's default network whose containers all use
+  host networking, or an idle `docker0`) no longer appear as disconnected
+  floating islands on the canvas.
+
 ## [0.4.2] - 2026-06-24
 
 A packaging fix for the Windows build.
