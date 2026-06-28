@@ -35,6 +35,28 @@ def render_text(label: str, interfaces: list[Interface]) -> str:
 # Entry points
 # ---------------------------------------------------------------------------
 
+def _add_plan_ops(subparsers: argparse._SubParsersAction, is_apply: bool) -> None:
+    """Register plan/apply sub-operations (shared between 'plan' and 'apply')."""
+    confirm_flag = {"--confirm": dict(action="store_true",
+                                     help="actually run the commands")} if is_apply else {}
+
+    def _sub(name, help_text, *positionals):
+        p = subparsers.add_parser(name, help=help_text)
+        for pos in positionals:
+            p.add_argument(pos)
+        for flag, kwargs in confirm_flag.items():
+            p.add_argument(flag, **kwargs)
+        p.add_argument("--json", action="store_true", help="machine-readable output")
+        p.set_defaults(op=name)
+
+    _sub("up",       "bring an interface up",               "iface")
+    _sub("down",     "bring an interface down",             "iface")
+    _sub("set-mtu",  "set interface MTU",                   "iface", "mtu")
+    _sub("set-mac",  "set interface MAC address",           "iface", "mac")
+    _sub("add-addr", "add an IP address (CIDR) to an interface", "iface", "cidr")
+    _sub("del-addr", "remove an IP address from an interface",   "iface", "cidr")
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="netgrip",
@@ -42,7 +64,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--host", metavar="HOST",
-        help="connect to a remote host over SSH on startup (e.g. user@10.0.0.2)",
+        help="connect to a remote host over SSH (e.g. user@10.0.0.2)",
     )
     parser.add_argument(
         "--demo", action="store_true",
@@ -60,6 +82,31 @@ def _build_parser() -> argparse.ArgumentParser:
         "--cli", action="store_true",
         help="force plain-text output; skip the GUI even when a display is available",
     )
+
+    subs = parser.add_subparsers(dest="subcommand", metavar="COMMAND")
+
+    # netgrip show
+    show_p = subs.add_parser("show", help="display live network interface state")
+    show_p.add_argument("--json", action="store_true", help="machine-readable output")
+    show_p.add_argument("--demo", action="store_true", help="use canned demo data")
+
+    # netgrip backend
+    backend_p = subs.add_parser("backend", help="show which config backend owns this host")
+    backend_p.add_argument("--json", action="store_true", help="machine-readable output")
+
+    # netgrip plan <op> <args>
+    plan_p = subs.add_parser("plan", help="print the iproute2 commands for a change (dry-run)")
+    plan_ops = plan_p.add_subparsers(dest="op", metavar="OP")
+    _add_plan_ops(plan_ops, is_apply=False)
+
+    # netgrip apply <op> <args>
+    apply_p = subs.add_parser(
+        "apply",
+        help="print commands for a change and run them with --confirm",
+    )
+    apply_ops = apply_p.add_subparsers(dest="op", metavar="OP")
+    _add_plan_ops(apply_ops, is_apply=True)
+
     return parser
 
 
@@ -136,6 +183,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
 
+    if args.subcommand in ("show", "backend", "plan", "apply"):
+        return _dispatch_subcommand(args)
+
     if choose_gui(force_gui=args.gui, force_cli=args.cli):
         return _launch_gui(args)
 
@@ -148,6 +198,28 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     return _cli_main(args)
+
+
+def _dispatch_subcommand(args: argparse.Namespace) -> int:
+    from netgrip.cli import cmd_apply, cmd_backend, cmd_plan, cmd_show
+    from netgrip.core.runner import LocalRunner, SSHRunner
+
+    runner = SSHRunner(args.host) if getattr(args, "host", None) else LocalRunner()
+
+    if args.subcommand == "show":
+        return cmd_show(runner, args)
+    if args.subcommand == "backend":
+        return cmd_backend(runner, args)
+    if args.subcommand == "plan":
+        if not getattr(args, "op", None):
+            print("usage: netgrip plan <op> <args>  (try: netgrip plan --help)", file=sys.stderr)
+            return 1
+        return cmd_plan(args)
+    if args.subcommand == "apply":
+        if not getattr(args, "op", None):
+            print("usage: netgrip apply <op> <args>  (try: netgrip apply --help)", file=sys.stderr)
+            return 1
+        return cmd_apply(runner, args)
 
 
 if __name__ == "__main__":
