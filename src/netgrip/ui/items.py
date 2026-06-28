@@ -5,13 +5,14 @@ configs, joined by plain straight lines.
 from __future__ import annotations
 
 import itertools
+import time
 
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainterPath, QPen
 from PySide6.QtWidgets import QApplication, QGraphicsItem, QGraphicsObject, QGraphicsPathItem
 
 from netgrip.core.actions import BOND_MODES
-from netgrip.core.model import Address, Container, Interface
+from netgrip.core.model import Address, Container, Interface, WgPeer
 from netgrip.ui import glyphs, theme
 
 PAD = 9.0
@@ -349,6 +350,54 @@ class ContainerNode(BaseNode):
     def _paint_extra(self, painter) -> None:
         self._paint_status_dot(painter, self.container.state == "running")
         self._paint_corner_glyph(painter, "container")
+
+
+def _fmt_handshake(latest_handshake: int) -> str:
+    """Human-readable age of the last WireGuard handshake, or 'never'."""
+    if not latest_handshake:
+        return "handshake: never"
+    age = int(time.time()) - latest_handshake
+    if age < 60:
+        return "handshake: just now"
+    if age < 3600:
+        mins = age // 60
+        return f"handshake: {mins} min ago"
+    if age < 86400:
+        hrs = age // 3600
+        return f"handshake: {hrs} hr ago"
+    days = age // 86400
+    return f"handshake: {days} day{'s' if days != 1 else ''} ago"
+
+
+class WgPeerNode(BaseNode):
+    """A WireGuard peer box: shows its allowed-IPs, endpoint, handshake age
+    and per-peer transfer totals. Rendered as a slightly-deeper WG blue.
+
+    A solid member Edge connects it to its tunnel interface (wg0, etc.); when
+    the peer has an endpoint and the probe could resolve a route for it, a
+    separate dashed ``wg_via`` edge connects it to the NIC that egress currently
+    flows through — explicitly volatile, not a fixed binding.
+    """
+
+    def __init__(self, iface: Interface, peer: WgPeer):
+        self.iface = iface
+        self.peer = peer
+        short = peer.public_key[-8:] if len(peer.public_key) >= 8 else peer.public_key
+        title = f"…{short}"
+        lines: list[str] = []
+        for cidr in peer.allowed_ips:
+            lines.append(cidr)
+        if peer.endpoint:
+            lines.append(peer.endpoint)
+        lines.append(_fmt_handshake(peer.latest_handshake))
+        if peer.rx_bytes or peer.tx_bytes:
+            lines.append(f"rx {_fmt_bytes(peer.rx_bytes)}  tx {_fmt_bytes(peer.tx_bytes)}")
+        body, border = theme.node("wg_peer")
+        super().__init__(title, lines, body, border)
+        self.key = f"wgpeer:{iface.name}:{peer.public_key}"
+
+    def _paint_extra(self, painter) -> None:
+        self._paint_corner_glyph(painter, "tunnel", beside_dot=False)
 
 
 def ip_key(parent_name: str, cidr: str) -> str:

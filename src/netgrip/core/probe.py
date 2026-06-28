@@ -12,6 +12,7 @@ from netgrip.core.model import (
     Gateway,
     Interface,
     PortMapping,
+    WgPeer,
 )
 from netgrip.core.runner import Runner
 
@@ -87,6 +88,13 @@ STATS_COMMAND = ["ip", "-s", "-j", "link", "show"]
 # Routing protocols that mean "the kernel/DHCP/RA put this here", not the user.
 _DYNAMIC_PROTOCOLS = {"dhcp", "ra", "redirect", "kernel"}
 
+# WireGuard peer dump. Requires CAP_NET_ADMIN; degrades silently when
+# unprivileged or when the `wg` tool is absent. First line is the interface's
+# own row (private-key, public-key, listen-port, fwmark); subsequent lines are
+# peers (tab-separated: public-key, preshared-key, endpoint, allowed-ips,
+# latest-handshake, rx-bytes, tx-bytes, keepalive).
+_WG_DUMP_TMPL = ["wg", "show", "{dev}", "dump"]
+
 
 def probe(runner: Runner) -> list[Interface]:
     out = runner.run(PROBE_COMMAND)
@@ -102,6 +110,7 @@ def probe(runner: Runner) -> list[Interface]:
     _enrich_bridge_vlans(runner, interfaces)
     _enrich_wireless(runner, interfaces)
     _enrich_stats(runner, interfaces)
+    _enrich_wg_peers(runner, interfaces)
     return interfaces
 
 
@@ -213,6 +222,91 @@ def _enrich_stats(runner: Runner, interfaces: list[Interface]) -> None:
         if iface is not None:
             iface.rx_bytes = rx
             iface.tx_bytes = tx
+
+
+def _enrich_wg_peers(runner: Runner, interfaces: list[Interface]) -> None:
+    """Populate wg_peers on every wireguard interface via `wg show <dev> dump`.
+
+    Requires CAP_NET_ADMIN / root. Degrades silently when the `wg` tool is
+    absent, the interface is gone, or we lack privilege — the interface box
+    still renders, just without peer detail. For each peer whose endpoint IP
+    can be resolved, we also run `ip route get` to find which NIC currently
+    carries that traffic and tag it on the peer as egress_dev/egress_src.
+    """
+    for iface in interfaces:
+        if iface.kind != "wireguard":
+            continue
+        cmd = [part.replace("{dev}", iface.name) for part in _WG_DUMP_TMPL]
+        try:
+            text = runner.run(cmd)
+        except (RuntimeError, ValueError):
+            continue  # wg missing, EPERM, or interface gone — silent degrade
+        iface.wg_peers = parse_wg_dump(text)
+
+    # Egress-route probe: one `ip route get` per peer that has an endpoint.
+    for iface in interfaces:
+        for peer in iface.wg_peers:
+            ep_ip = _endpoint_ip(peer.endpoint)
+            if not ep_ip:
+                continue
+            try:
+                out = runner.run(["ip", "-json", "route", "get", ep_ip])
+                routes = json.loads(out)
+            except (RuntimeError, ValueError):
+                continue
+            if not isinstance(routes, list) or not routes:
+                continue
+            r = routes[0]
+            peer.egress_dev = r.get("dev") or None
+            peer.egress_src = r.get("prefsrc") or None
+
+
+def parse_wg_dump(text: str) -> list[WgPeer]:
+    """Parse `wg show <dev> dump` output into :class:`WgPeer` objects.
+
+    The first line is the interface's own row and is skipped. Each subsequent
+    line is a peer: eight tab-separated fields — public-key, preshared-key,
+    endpoint, allowed-ips (comma-separated CIDRs), latest-handshake (unix
+    timestamp), transfer-rx, transfer-tx, persistent-keepalive. Malformed
+    lines are skipped silently so a partial output still yields clean peers.
+    """
+    peers: list[WgPeer] = []
+    lines = text.strip().splitlines()
+    for line in lines[1:]:  # skip the interface row
+        parts = line.split("\t")
+        if len(parts) < 7:
+            continue
+        pub_key = parts[0]
+        endpoint_raw = parts[2]
+        endpoint = "" if endpoint_raw == "(none)" else endpoint_raw
+        allowed_raw = parts[3]
+        allowed_ips = [a for a in allowed_raw.split(",") if a and a != "(none)"]
+        try:
+            latest_handshake = int(parts[4])
+            rx_bytes = int(parts[5])
+            tx_bytes = int(parts[6])
+        except (ValueError, IndexError):
+            latest_handshake = rx_bytes = tx_bytes = 0
+        peers.append(WgPeer(
+            public_key=pub_key,
+            endpoint=endpoint,
+            allowed_ips=allowed_ips,
+            latest_handshake=latest_handshake,
+            rx_bytes=rx_bytes,
+            tx_bytes=tx_bytes,
+        ))
+    return peers
+
+
+def _endpoint_ip(endpoint: str) -> str | None:
+    """Extract the bare IP from an endpoint string like '1.2.3.4:51820' or '[::1]:51820'."""
+    if not endpoint:
+        return None
+    if endpoint.startswith("["):  # IPv6 bracket notation: [addr]:port
+        end = endpoint.find("]")
+        return endpoint[1:end] if end > 1 else None
+    colon = endpoint.rfind(":")
+    return endpoint[:colon] if colon > 0 else None
 
 
 def parse_wireless(text: str) -> set[str]:

@@ -10,6 +10,7 @@ from netgrip.core.probe import (
     _LINKDOMAIN,
     DNS_COMMAND,
     DOCKER_NETWORK_COMMAND,
+    _endpoint_ip,
     apply_docker,
     parse_addr_json,
     parse_bridge_vlan_json,
@@ -20,6 +21,7 @@ from netgrip.core.probe import (
     parse_resolvectl_links,
     parse_route_json,
     parse_stats_json,
+    parse_wg_dump,
     parse_wireless,
     probe_dns,
     probe_docker,
@@ -550,3 +552,83 @@ def test_parse_stats_json_falls_back_to_32bit():
 def test_parse_stats_json_missing_block_yields_zeros():
     result = {name: (rx, tx) for name, rx, tx in parse_stats_json(STATS_FIXTURE)}
     assert result["wg0"] == (0, 0)
+
+
+# `wg show wg0 dump` fixture: interface row, then two peers — one with a
+# known endpoint and transfer counts, one roaming (no endpoint, never connected).
+WG_DUMP = "\t".join([
+    "oI2lGBFJGUi67bJqnXB9DfKHJCiuSXYpCvv2XAp8Vw=",  # private-key
+    "PubKeyForInterface=",                              # public-key
+    "51820",                                            # listen-port
+    "off",                                              # fwmark
+]) + "\n" + "\t".join([
+    "XNnEBFJGUi67bJqnXB9DfKHJCiuSXYpCvv2XAp8Vw=",  # public-key
+    "vCHJEoW7gvJdKrPq3V3u8yTjHZBFKLIe1dX2t3S4=",   # preshared-key
+    "198.51.100.1:51820",                               # endpoint
+    "10.200.0.2/32,192.168.100.0/24",                  # allowed-ips
+    "1700000000",                                       # latest-handshake
+    "524288",                                           # rx-bytes
+    "393216",                                           # tx-bytes
+    "off",                                              # keepalive
+]) + "\n" + "\t".join([
+    "yMnEBFJGUi67bJqnXB9DfKHJCiuSXYpCvv2XAp8Vw=",  # public-key (roaming)
+    "(none)",                                           # no preshared-key
+    "(none)",                                           # no endpoint
+    "10.200.0.3/32",                                    # allowed-ips
+    "0",                                                # never connected
+    "0", "0",                                           # no transfer
+    "25",                                               # keepalive
+])
+
+
+def test_parse_wg_dump_returns_peers_skips_interface_row():
+    peers = parse_wg_dump(WG_DUMP)
+    assert len(peers) == 2
+
+
+def test_parse_wg_dump_first_peer_fields():
+    peers = parse_wg_dump(WG_DUMP)
+    p = peers[0]
+    assert p.public_key == "XNnEBFJGUi67bJqnXB9DfKHJCiuSXYpCvv2XAp8Vw="
+    assert p.endpoint == "198.51.100.1:51820"
+    assert p.allowed_ips == ["10.200.0.2/32", "192.168.100.0/24"]
+    assert p.latest_handshake == 1_700_000_000
+    assert p.rx_bytes == 524_288
+    assert p.tx_bytes == 393_216
+    assert p.egress_dev is None  # not set by parse, only by probe_wg
+
+
+def test_parse_wg_dump_roaming_peer_has_empty_endpoint_and_no_allowed_ips_from_none():
+    peers = parse_wg_dump(WG_DUMP)
+    p = peers[1]
+    assert p.public_key == "yMnEBFJGUi67bJqnXB9DfKHJCiuSXYpCvv2XAp8Vw="
+    assert p.endpoint == ""  # "(none)" -> ""
+    assert p.allowed_ips == ["10.200.0.3/32"]
+    assert p.latest_handshake == 0
+    assert p.rx_bytes == 0
+    assert p.tx_bytes == 0
+
+
+def test_parse_wg_dump_empty_yields_empty():
+    assert parse_wg_dump("") == []
+    # Only an interface row, no peers.
+    assert parse_wg_dump("privkey\tpubkey\t51820\toff") == []
+
+
+def test_parse_wg_dump_malformed_line_skipped():
+    # A line with fewer than 7 fields is silently dropped.
+    dump = "privkey\tpubkey\t51820\toff\n" "pubkey\tpsk\t(none)"  # only 3 fields
+    assert parse_wg_dump(dump) == []
+
+
+def test_endpoint_ip_extracts_ipv4():
+    assert _endpoint_ip("198.51.100.1:51820") == "198.51.100.1"
+
+
+def test_endpoint_ip_extracts_ipv6():
+    assert _endpoint_ip("[2001:db8::1]:51820") == "2001:db8::1"
+
+
+def test_endpoint_ip_empty_returns_none():
+    assert _endpoint_ip("") is None
+    assert _endpoint_ip("(none)") is None

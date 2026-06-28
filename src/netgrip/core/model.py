@@ -45,6 +45,28 @@ class Address:
 
 
 @dataclass
+class WgPeer:
+    """A WireGuard peer, as read from `wg show <dev> dump`.
+
+    ``endpoint`` is the peer's configured endpoint ``ip:port`` (IPv6 as
+    ``[addr]:port``), or an empty string when not set. ``allowed_ips`` is the
+    list of CIDRs this peer is allowed to send/receive for. ``latest_handshake``
+    is a unix timestamp (0 = never). ``egress_dev`` / ``egress_src`` are set by
+    the probe only when privileged and record which NIC the endpoint IP is
+    currently routed through — volatile routing state, not a fixed binding.
+    """
+
+    public_key: str
+    endpoint: str
+    allowed_ips: list[str]
+    latest_handshake: int  # unix timestamp; 0 = never connected
+    rx_bytes: int
+    tx_bytes: int
+    egress_dev: str | None = None  # NIC the endpoint currently routes through
+    egress_src: str | None = None  # source IP used for that route
+
+
+@dataclass
 class Gateway:
     """The default route for one address family on one interface.
 
@@ -172,6 +194,9 @@ class Interface:
     # Zero when stats weren't read (remote probe without -s) or counter is genuinely zero.
     rx_bytes: int = 0
     tx_bytes: int = 0
+    # WireGuard peers, populated by probe_wg() for wireguard interfaces.
+    # Empty list for every non-wireguard interface and when unprivileged.
+    wg_peers: list[WgPeer] = field(default_factory=list)
 
     @property
     def is_up(self) -> bool:

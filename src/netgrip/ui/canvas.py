@@ -26,6 +26,7 @@ from netgrip.ui.items import (
     RouteEdge,
     SystemDns,
     VlanNode,
+    WgPeerNode,
     new_draft_id,
 )
 
@@ -343,6 +344,14 @@ class Canvas(QGraphicsView):
                 if bridge in shown_names:
                     container_edges.append((if_nodes[bridge].key, node.key))
 
+        # WireGuard peer nodes: one box per peer on each wireguard interface.
+        wg_peer_nodes: list[WgPeerNode] = []
+        for iface in shown:
+            if iface.kind != "wireguard":
+                continue
+            for peer in iface.wg_peers:
+                wg_peer_nodes.append(WgPeerNode(iface, peer))
+
         # Topology graph for the auto-layout. These are exactly the same
         # relationships drawn as edges below (vlan->parent, member->master,
         # veth peer<->peer, interface->IP groups), built once so the layout
@@ -352,6 +361,8 @@ class Canvas(QGraphicsView):
         for group in ip_groups:
             node_by_key[group.key] = group
         for node in container_nodes:
+            node_by_key[node.key] = node
+        for node in wg_peer_nodes:
             node_by_key[node.key] = node
 
         graph_edges: list[tuple[str, str]] = []
@@ -365,6 +376,10 @@ class Canvas(QGraphicsView):
                 graph_edges.append((key, if_nodes[iface.peer].key))
         for group in ip_groups:
             graph_edges.append((if_nodes[group.iface.name].key, group.key))
+        # WG peers are children of their tunnel interface in the graph, so they
+        # lay out directly to the right of it.
+        for node in wg_peer_nodes:
+            graph_edges.append((if_nodes[node.iface.name].key, node.key))
         graph_edges.extend(container_edges)
 
         # Layout-only edges (placement, not drawn): tie each container to the
@@ -398,9 +413,10 @@ class Canvas(QGraphicsView):
             priority.append(if_nodes[iface.name].key)
             priority.extend(g.key for g in groups_by_iface[iface.name])
         priority.extend(n.key for n in container_nodes)
+        priority.extend(n.key for n in wg_peer_nodes)
 
         for node in [*if_nodes.values(), *ip_nodes, *draft_nodes, *draft_vlan_nodes,
-                     *container_nodes]:
+                     *container_nodes, *wg_peer_nodes]:
             scene.addItem(node)
             node.drag_finished.connect(self._make_drop_handler(node))
             node.drag_finished.connect(self._save_state)
@@ -446,6 +462,10 @@ class Canvas(QGraphicsView):
             layout.Box(n.key, n.boundingRect().width(), n.boundingRect().height())
             for n in container_nodes
         ]
+        boxes += [
+            layout.Box(n.key, n.boundingRect().width(), n.boundingRect().height())
+            for n in wg_peer_nodes
+        ]
         placement = layout.solve(
             boxes, layout_edges, sources, priority,
             margin_x=MARGIN, margin_y=start_y, col_gap=COL_GAP, row_gap=V_GAP,
@@ -470,7 +490,7 @@ class Canvas(QGraphicsView):
         # Remembered positions win over the automatic layout; members moving
         # makes their group reflow around them. _positions is intact here
         # because the saver was muted through the auto pass above.
-        remembered = [*if_nodes.values(), *ip_nodes, *container_nodes]
+        remembered = [*if_nodes.values(), *ip_nodes, *container_nodes, *wg_peer_nodes]
         for node in remembered:
             if node.key in self._positions:
                 node.setPos(self._positions[node.key])
@@ -523,12 +543,23 @@ class Canvas(QGraphicsView):
                         and egress.key not in forwards:
                     scene.addItem(RouteEdge(node, egress, kind="egress"))
 
+        # WireGuard egress edges: a dashed "wg_via" line from each peer to the NIC
+        # that its endpoint currently routes through, labelled "via (current)". This
+        # is volatile routing state, not a fixed binding — visible only when either
+        # end is selected, exactly like the container forward-port labels.
+        for peer_node in wg_peer_nodes:
+            egress_dev = peer_node.peer.egress_dev
+            if egress_dev and egress_dev in if_nodes:
+                scene.addItem(
+                    RouteEdge(peer_node, if_nodes[egress_dev], "via (current)", kind="wg_via")
+                )
+
         # The DNS frame wraps the finished diagram, so fit it last — after every
         # node (including remembered positions) has settled.
         if dns_node is not None:
             content = QRectF()
             for node in [*if_nodes.values(), *ip_nodes, *ip_groups,
-                         *draft_nodes, *draft_vlan_nodes, *container_nodes]:
+                         *draft_nodes, *draft_vlan_nodes, *container_nodes, *wg_peer_nodes]:
                 content = content.united(node.sceneBoundingRect())
             dns_node.wrap(content)
 

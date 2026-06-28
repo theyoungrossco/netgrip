@@ -14,6 +14,7 @@ from netgrip.core.model import (
     Gateway,
     Interface,
     PortMapping,
+    WgPeer,
 )
 
 # Effective resolvers shown in demo mode (as if read from resolv.conf). Each
@@ -86,12 +87,32 @@ def demo_interfaces() -> list[Interface]:
         ),
         # A WireGuard VPN tunnel. Real WireGuard interfaces have no MAC address
         # (link_type "none" in iproute2) and a reduced MTU to leave room for the
-        # WireGuard header. The tunnel IP is a dedicated VPN subnet.
+        # WireGuard header. The tunnel IP is a dedicated VPN subnet. Peers are
+        # shown as separate boxes; egress_dev tags which NIC the endpoint routes
+        # through (volatile routing state, never a fixed binding).
         Interface(
             name="wg0", index=18, kind="wireguard", state="up",
             mtu=1420,
             addresses=[Address("10.200.0.1", 24, 4)],
             rx_bytes=1_048_576, tx_bytes=786_432,
+            wg_peers=[
+                WgPeer(
+                    public_key="XNnEBFJGUi67bJqnXB9DfKHJCiuSXYpCvv2XAp8Vw=",
+                    endpoint="198.51.100.1:51820",
+                    allowed_ips=["10.200.0.2/32", "192.168.100.0/24"],
+                    latest_handshake=1_700_000_000,
+                    rx_bytes=524_288, tx_bytes=393_216,
+                    egress_dev="eth0", egress_src="192.168.1.10",
+                ),
+                WgPeer(
+                    public_key="yMnEBFJGUi67bJqnXB9DfKHJCiuSXYpCvv2XAp8Vw=",
+                    endpoint="",  # roaming peer — no fixed endpoint
+                    allowed_ips=["10.200.0.3/32"],
+                    latest_handshake=0,  # never connected
+                    rx_bytes=0, tx_bytes=0,
+                    egress_dev=None, egress_src=None,
+                ),
+            ],
         ),
         # A veth pair, both ends in this namespace (as Proxmox's firewall
         # fwln/fwpr links appear): each names the other as its peer, drawn as a

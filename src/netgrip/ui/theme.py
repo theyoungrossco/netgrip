@@ -48,7 +48,9 @@ _LIGHT = {
     "dns": ("#eceef0", "#7a828a"),
     "container": ("#e3e7f8", "#5a63c0"),
     "wireguard": ("#e8edf8", "#3d5fa0"),
+    "wg_peer": ("#dde8f6", "#2a4f90"),  # slightly deeper than the tunnel box
     "host_net": "#7c4fa8",  # solid purple for host-network container lines
+    "wg_via": "#3d5fa0",   # dashed via-current line in WG blue
 }
 _DARK = {
     "background": "#1e2228",
@@ -71,7 +73,9 @@ _DARK = {
     "dns": ("#2a2e34", "#828b94"),
     "container": ("#272b41", "#828ce0"),
     "wireguard": ("#202840", "#6a8fd0"),
+    "wg_peer": ("#1a2438", "#5980c4"),  # slightly lighter than the tunnel box
     "host_net": "#a06cd4",  # solid purple for host-network container lines
+    "wg_via": "#6a8fd0",   # dashed via-current line in WG blue
 }
 
 # Legend / glossary categories in display order: (label, colour key, hint,
@@ -197,6 +201,10 @@ def line_pen(kind: str) -> QPen:
     elif kind == "host_net":
         pen = QPen(QColor(_table()["host_net"]), 1.8)
         pen.setStyle(Qt.PenStyle.SolidLine)
+    elif kind == "wg_via":
+        # Dashed, WG-blue: "peer → NIC via (current route)" — volatile egress.
+        pen = QPen(QColor(_table()["wg_via"]), 1.2)
+        pen.setStyle(Qt.PenStyle.DashLine)
     else:  # member
         pen = QPen(edge(), 1.4)
     return pen
