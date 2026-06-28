@@ -49,6 +49,8 @@ _LIGHT = {
     "container": ("#e3e7f8", "#5a63c0"),
     "wireguard": ("#e8edf8", "#3d5fa0"),
     "host_net": "#7c4fa8",  # solid purple for host-network container lines
+    "firewall": ("#fdf3e7", "#c87a3a"),      # amber tint — firewall rule box
+    "firewall_deny": ("#fde8e8", "#c0392b"),  # red tint — deny/drop rule
 }
 _DARK = {
     "background": "#1e2228",
@@ -72,6 +74,8 @@ _DARK = {
     "container": ("#272b41", "#828ce0"),
     "wireguard": ("#202840", "#6a8fd0"),
     "host_net": "#a06cd4",  # solid purple for host-network container lines
+    "firewall": ("#2e2414", "#d4854a"),       # amber tint — firewall rule box
+    "firewall_deny": ("#2e1414", "#e06a5a"),  # red tint — deny/drop rule
 }
 
 # Legend / glossary categories in display order: (label, colour key, hint,

@@ -8,6 +8,7 @@ system themselves.
 from __future__ import annotations
 
 import ipaddress
+import re
 from dataclasses import dataclass, field
 
 from netgrip.core.backends import Backend
@@ -17,6 +18,9 @@ ATTACHABLE_KINDS = {"physical", "bond", "bridge", "team", "vlan", "loopback"}
 
 # Interface kinds rendered as a "group" (several NICs joined together).
 GROUP_KINDS = {"bond", "bridge", "team"}
+
+# Proxmox-style VM bridge name: vmbrN (vmbr0, vmbr1, ...).
+_VMBR_RE = re.compile(r"^vmbr\d+$")
 
 
 def ip_family(addr: str) -> int | None:
@@ -144,6 +148,12 @@ class Interface:
     vlan_id: int | None = None
     vlan_parent: str | None = None
     bond_mode: str | None = None
+    # For a bond master: the name of the currently-active slave (active-backup
+    # mode only; None when the mode doesn't elect one or when none is active).
+    bond_active_slave: str | None = None
+    # For a bond slave: the kernel slave state ("ACTIVE", "BACKUP",
+    # "GOING_BACK", etc.). Only populated for bond members; None for all others.
+    bond_slave_state: str | None = None
     # The other end of a veth pair, when both ends live in this namespace (the
     # Proxmox firewall fwln/fwpr case). A container's far end sits in its own
     # netns and is not visible here, so this stays None for those.
@@ -185,6 +195,16 @@ class Interface:
     def is_vm_tap(self) -> bool:
         """True for a KVM/QEMU tap port: a tun device enslaved to a bridge."""
         return self.kind == "tun" and self.master is not None
+
+    @property
+    def is_proxmox_bridge(self) -> bool:
+        """True for a Linux bridge following the Proxmox vmbrN naming convention.
+
+        Proxmox names its VM bridges ``vmbr0``, ``vmbr1``, etc. This property
+        lets the UI and plan helpers distinguish them from docker bridges,
+        loopback-local bridges and other programmatically-named bridges.
+        """
+        return self.kind == "bridge" and bool(_VMBR_RE.match(self.name))
 
     def addresses_for(self, family: int) -> list[Address]:
         return [a for a in self.addresses if a.family == family]
@@ -278,6 +298,26 @@ class HostState:
     def members_of(self, group_name: str) -> list[Interface]:
         return [i for i in self.interfaces if i.master == group_name]
 
+    def vm_taps_of(self, bridge_name: str) -> list[Interface]:
+        """VM tap interfaces (tun devices) enslaved to ``bridge_name``.
+
+        These are the host-side ports that KVM/QEMU VMs appear on — kind=``tun``
+        with a bridge master. LXC container veths share the same bridge membership
+        pattern but appear as ``kind=veth``; this helper returns only tap/tun ports
+        so callers that want all bridge members can use :meth:`members_of`.
+        """
+        return [i for i in self.interfaces
+                if i.master == bridge_name and i.is_vm_tap]
+
+    def proxmox_bridges(self) -> list[Interface]:
+        """Bridges following the Proxmox vmbrN naming convention.
+
+        Returns interfaces whose name matches ``vmbrN`` (vmbr0, vmbr1, ...) and
+        whose kind is ``bridge``. Useful for populating a "target bridge" menu in
+        attach-tap and detach-tap dialogs.
+        """
+        return [i for i in self.interfaces if i.is_proxmox_bridge]
+
     def free_nics(self) -> list[Interface]:
         """Physical NICs not currently enslaved to a bond/bridge."""
         return [i for i in self.interfaces if i.kind == "physical" and i.master is None]
@@ -314,3 +354,97 @@ class HostState:
             if 4 in iface.gateways:
                 return iface
         return None
+
+
+# ---------------------------------------------------------------------------
+# nftables / firewall model  (read-only snapshot; mutations via actions.py)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class NftRule:
+    """One rule within an nftables chain.
+
+    ``handle`` uniquely identifies the rule within its chain and is the stable
+    key used to delete it.  ``expr_str`` is a compact, human-readable rendering
+    of the rule's expression list — enough to show in a UI panel without re-
+    parsing the raw JSON.
+
+    ``ifaces`` contains interface names the rule explicitly matches on via
+    ``iifname`` / ``oifname``, extracted at parse time so the UI can group rules
+    per interface without re-scanning expr_str.
+    """
+
+    handle: int
+    chain: str
+    table: str
+    family: str
+    expr_str: str
+    comment: str = ""
+    ifaces: list[str] = field(default_factory=list)
+
+
+@dataclass
+class NftChain:
+    """One chain in an nftables table.
+
+    Base chains (with a ``hook``) are attached to Netfilter and process every
+    packet that traverses that hook.  Regular chains have no hook and are only
+    called via ``jump`` or ``goto``.
+    """
+
+    name: str
+    table: str
+    family: str
+    handle: int = 0
+    # Present only on base chains:
+    type: str = ""     # filter | nat | route
+    hook: str = ""     # input | forward | output | prerouting | postrouting
+    prio: int = 0
+    policy: str = ""   # accept | drop
+    rules: list[NftRule] = field(default_factory=list)
+
+
+@dataclass
+class NftTable:
+    """One nftables table — a namespace for chains and sets."""
+
+    name: str
+    family: str   # ip | ip6 | inet | arp | bridge | netdev
+    handle: int = 0
+    chains: list[NftChain] = field(default_factory=list)
+
+
+@dataclass
+class NftRuleset:
+    """The full nftables ruleset, parsed from ``nft -j list ruleset``.
+
+    Read-only: this is a kernel snapshot.  Mutations go through
+    ``core/actions.py`` plan functions (plan_nft_add_rule /
+    plan_nft_delete_rule).
+    """
+
+    tables: list[NftTable] = field(default_factory=list)
+
+    def all_rules(self) -> list[NftRule]:
+        """Flat list of every rule across all tables and chains, in parse order."""
+        return [r for t in self.tables for c in t.chains for r in c.rules]
+
+    def rules_for_iface(self, iface_name: str) -> list[NftRule]:
+        """Rules that explicitly reference ``iface_name`` via iifname/oifname."""
+        return [r for r in self.all_rules() if iface_name in r.ifaces]
+
+    def chains_for_iface(self, iface_name: str) -> list[NftChain]:
+        """Chains containing at least one rule that references ``iface_name``.
+
+        Returned in table/parse order; duplicates are suppressed (a chain only
+        appears once even if multiple rules reference the same interface).
+        """
+        seen: set[tuple[str, str, str]] = set()
+        result: list[NftChain] = []
+        for t in self.tables:
+            for c in t.chains:
+                key = (c.family, c.table, c.name)
+                if key not in seen and any(iface_name in r.ifaces for r in c.rules):
+                    seen.add(key)
+                    result.append(c)
+        return result

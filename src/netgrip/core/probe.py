@@ -461,6 +461,8 @@ def parse_addr_json(payload: list[dict]) -> list[Interface]:
         elif not kind:
             kind = "physical"
 
+        is_bond_slave = linkinfo.get("info_slave_kind") == "bond"
+        slave_data = (linkinfo.get("info_slave_data") or {}) if is_bond_slave else {}
         iface = Interface(
             name=item.get("ifname", "?"),
             index=item.get("ifindex", 0),
@@ -473,6 +475,8 @@ def parse_addr_json(payload: list[dict]) -> list[Interface]:
             vlan_id=info_data.get("id") if kind == "vlan" else None,
             vlan_parent=item.get("link") if kind == "vlan" else None,
             bond_mode=info_data.get("mode") if kind == "bond" else None,
+            bond_active_slave=info_data.get("active_slave") or None if kind == "bond" else None,
+            bond_slave_state=slave_data.get("state") or None if slave_data else None,
             bridge_vlan_aware=bool(info_data.get("vlan_filtering")) if kind == "bridge" else False,
         )
         if kind == "veth":

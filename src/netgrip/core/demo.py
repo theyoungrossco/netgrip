@@ -60,16 +60,19 @@ def demo_interfaces() -> list[Interface]:
         Interface(
             name="eth1", index=3, kind="physical", state="up",
             mac="52:54:00:a1:b2:c4", mtu=1500, master="bond0",
+            bond_slave_state="ACTIVE",
             rx_bytes=12_345_678, tx_bytes=8_901_234,
         ),
         Interface(
             name="eth2", index=4, kind="physical", state="up",
             mac="52:54:00:a1:b2:c5", mtu=1500, master="bond0",
+            bond_slave_state="BACKUP",
             rx_bytes=11_222_333, tx_bytes=7_654_321,
         ),
         Interface(
             name="bond0", index=5, kind="bond", state="up",
             mac="52:54:00:a1:b2:c4", mtu=1500, bond_mode="802.3ad",
+            bond_active_slave="eth1",
             gateways={4: Gateway("10.0.0.1")},  # statically configured (not DHCP)
             dns=["9.9.9.9"],
             addresses=[Address("10.0.0.5", 24, 4)],

@@ -172,7 +172,11 @@ def _iface_detail(iface: Interface) -> list[str]:
     else:
         lines.append(f"mtu {iface.mtu}")
     if iface.master:
-        lines.append(f"member of {iface.master}")
+        slave_info = f"member of {iface.master}"
+        if iface.bond_slave_state:
+            state_label = iface.bond_slave_state.lower()  # "active" / "backup" etc.
+            slave_info += f"  ({state_label})"
+        lines.append(slave_info)
     if iface.kind not in ("physical", "loopback", "vlan", "bond", "bridge"):
         lines.append("vm tap" if iface.is_vm_tap else iface.kind)
     if iface.peer:
@@ -261,6 +265,8 @@ class GroupNode(BaseNode):
                 lines.append(iface.alias)
         if iface.kind == "bond":
             lines.append(BOND_MODES.get(iface.bond_mode or "", iface.bond_mode or "bond"))
+            if iface.bond_active_slave:
+                lines.append(f"active: {iface.bond_active_slave}")
         elif iface.docker_network:
             # The docker network is the title when there's no alias; name it
             # here only when the alias took the title.

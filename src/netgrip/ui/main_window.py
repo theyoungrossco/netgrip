@@ -1151,6 +1151,61 @@ class MainWindow(QMainWindow):
                 actions.plan_create_bond(dialog.name, dialog.mode, dialog.members),
             )
 
+    def _new_bridge_dialog(self, preselected: list[str] | None = None) -> None:
+        """Create a new bridge, optionally adding a NIC as the first member."""
+        if not self.state:
+            return
+        dialog = BridgeDialog(self, self.state.link_names())
+        if not dialog.exec():
+            return
+        plan = actions.plan_create_bridge(dialog.name, dialog.vlan_aware)
+        if preselected:
+            # Add the pre-selected NICs as members of the new bridge.
+            for nic_name in preselected:
+                plan += actions.plan_add_member(dialog.name, nic_name)
+        self._apply(f"Create bridge {dialog.name}", plan,
+                    revert=actions.plan_delete_link(dialog.name))
+
+    def _bridge_vlan_port_dialog(self, member: Interface) -> None:
+        """Configure VLAN membership for one port of a vlan-aware bridge."""
+        dlg = BridgeVlanPortDialog(
+            self, member.name, member.pvid, member.vlan_tags
+        )
+        if not dlg.exec():
+            return
+        plan: list[list[str]] = []
+        revert: list[list[str]] = []
+        # pvid change
+        if dlg.clear_pvid and member.pvid is not None:
+            plan += actions.plan_bridge_vlan_del(member.name, member.pvid)
+            revert += actions.plan_bridge_vlan_add(
+                member.name, member.pvid, pvid=True, tagged=False
+            )
+        elif dlg.new_pvid is not None:
+            plan += actions.plan_bridge_vlan_add(
+                member.name, dlg.new_pvid, pvid=True, tagged=False
+            )
+            revert += actions.plan_bridge_vlan_del(member.name, dlg.new_pvid)
+            if member.pvid is not None and member.pvid != dlg.new_pvid:
+                plan += actions.plan_bridge_vlan_del(member.name, member.pvid)
+                revert += actions.plan_bridge_vlan_add(
+                    member.name, member.pvid, pvid=True, tagged=False
+                )
+        # tagged VLAN changes
+        for vid in dlg.add_tagged:
+            plan += actions.plan_bridge_vlan_add(member.name, vid, tagged=True)
+            revert += actions.plan_bridge_vlan_del(member.name, vid)
+        for vid in dlg.del_tagged:
+            plan += actions.plan_bridge_vlan_del(member.name, vid)
+            revert += actions.plan_bridge_vlan_add(member.name, vid, tagged=True)
+        if not plan:
+            return  # nothing changed
+        self._apply(
+            f"Configure VLAN membership for {member.name}",
+            plan,
+            revert=revert if revert else None,
+        )
+
     # ------------------------------------------------------------------ #
     # context menus
     # ------------------------------------------------------------------ #
@@ -1277,6 +1332,10 @@ class MainWindow(QMainWindow):
                 "Create bond with this NIC…",
                 partial(self._new_bond_dialog, [iface.name]),
             )
+            menu.addAction(
+                "Create bridge with this NIC…",
+                partial(self._new_bridge_dialog, [iface.name]),
+            )
 
     def _fill_group_menu(self, menu: QMenu, iface: Interface) -> None:
         self._add_common_iface_items(menu, iface)
@@ -1293,6 +1352,30 @@ class MainWindow(QMainWindow):
                 )
                 action.setCheckable(True)
                 action.setChecked(value == iface.bond_mode)
+        elif iface.kind == "bridge":
+            # VLAN filtering toggle
+            vlan_label = ("Disable VLAN filtering" if iface.bridge_vlan_aware
+                          else "Enable VLAN filtering (vlan-aware)")
+            menu.addAction(
+                vlan_label,
+                partial(self._apply,
+                        f"{'Disable' if iface.bridge_vlan_aware else 'Enable'} "
+                        f"VLAN filtering on {iface.name}",
+                        actions.plan_set_bridge_vlan_aware(iface.name,
+                                                            not iface.bridge_vlan_aware),
+                        revert=actions.plan_set_bridge_vlan_aware(iface.name,
+                                                                   iface.bridge_vlan_aware)),
+            )
+            # Per-port VLAN membership (only meaningful on vlan-aware bridges)
+            if iface.bridge_vlan_aware:
+                members = self.state.members_of(iface.name)
+                if members:
+                    port_menu = menu.addMenu("Configure port VLANs")
+                    for member in members:
+                        port_menu.addAction(
+                            member.name,
+                            partial(self._bridge_vlan_port_dialog, member),
+                        )
         add_menu = menu.addMenu("Add member")
         free = self.state.free_nics()
         add_menu.setEnabled(bool(free))
@@ -1425,6 +1508,8 @@ class MainWindow(QMainWindow):
         menu.addAction(
             "New VLAN (draft)…", partial(self._new_vlan_draft_dialog, scene_pos)
         )
+        menu.addSeparator()
+        menu.addAction("Create bridge…", self._new_bridge_dialog)
         menu.addSeparator()
         menu.addAction("Refresh", self.refresh)
         menu.addAction("Auto-layout", self.canvas.auto_layout)

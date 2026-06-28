@@ -37,6 +37,7 @@ BOND_MODES = {
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,15}$")  # IFNAMSIZ is 16 incl. NUL
 _MAC_RE = re.compile(r"^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$")
+_VMBR_RE = re.compile(r"^vmbr\d+$")
 
 # Heredoc terminator for plan_write_file. Quoted (<<'…') so the shell expands
 # nothing in the body — every byte of a generated config file lands verbatim.
@@ -349,6 +350,70 @@ def affected_links(plan: list[list[str]]) -> set[str]:
     return links
 
 
+
+def next_vmbr_name(existing: set[str]) -> str:
+    """Suggest the next available vmbrN bridge name not already in ``existing``."""
+    n = 0
+    while f"vmbr{n}" in existing:
+        n += 1
+    return f"vmbr{n}"
+
+
+def plan_create_vmbr(name: str) -> list[list[str]]:
+    """Create a Linux bridge suitable for Proxmox-style VM bridging.
+
+    Brings the bridge up with STP disabled and zero forward delay — the standard
+    Proxmox defaults. After creation, call :func:`plan_set_bridge_vlan_aware` to
+    enable VLAN filtering when the bridge will carry tagged member ports.
+    """
+    return [
+        ["ip", "link", "add", "name", name, "type", "bridge"],
+        # Proxmox defaults: no spanning-tree, zero forward-delay.
+        ["ip", "link", "set", "dev", name, "type", "bridge",
+         "stp_state", "0", "forward_delay", "0"],
+        ["ip", "link", "set", "dev", name, "up"],
+    ]
+
+
+def plan_set_bridge_vlan_aware(name: str, enabled: bool) -> list[list[str]]:
+    """Enable or disable VLAN filtering (``vlan_filtering``) on a bridge.
+
+    When enabled (``vlan_filtering=1``) each member port can carry tagged and
+    untagged frames for individual VLANs; ``bridge vlan`` commands then control
+    the per-port VLAN set. When disabled (``0``) the bridge forwards all frames
+    regardless of 802.1q tags — the simpler default for single-VLAN VM bridges.
+    """
+    val = "1" if enabled else "0"
+    return [["ip", "link", "set", "dev", name, "type", "bridge",
+             "vlan_filtering", val]]
+
+
+def plan_attach_tap(tap: str, bridge: str) -> list[list[str]]:
+    """Attach a tap/veth interface to a bridge as a member port.
+
+    The interface is brought down first (the kernel requires it before enslaving),
+    then back up after. Semantically equivalent to :func:`plan_add_member` but
+    named for the Proxmox tap/veth port use-case so callers and tests read cleanly.
+    """
+    return [
+        ["ip", "link", "set", "dev", tap, "down"],
+        ["ip", "link", "set", "dev", tap, "master", bridge],
+        ["ip", "link", "set", "dev", tap, "up"],
+    ]
+
+
+def plan_detach_tap(tap: str) -> list[list[str]]:
+    """Detach a tap/veth interface from its bridge (remove from membership).
+
+    Semantically equivalent to :func:`plan_remove_member` but named for the
+    Proxmox tap/veth port use-case so callers and tests read cleanly.
+    """
+    return [
+        ["ip", "link", "set", "dev", tap, "nomaster"],
+        ["ip", "link", "set", "dev", tap, "up"],
+    ]
+
+
 def plan_install_ifupdown2() -> list[list[str]]:
     """Install ifupdown2 on a Debian/Proxmox host so it gains a persistence
     backend NetGrip can Save through.
@@ -362,3 +427,44 @@ def plan_install_ifupdown2() -> list[list[str]]:
         ["apt-get", "update"],
         ["env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "-y", "ifupdown2"],
     ]
+
+
+# ---------------------------------------------------------------------------
+# nftables firewall plans
+# ---------------------------------------------------------------------------
+
+def plan_nft_add_rule(
+    family: str, table: str, chain: str, rule_expr: str
+) -> list[list[str]]:
+    """Add a single nftables rule to the given chain.
+
+    The rule is appended after the chain's existing rules (no ``position`` or
+    ``index``), which means it runs before the chain policy.
+
+    ``rule_expr`` is the expression string in nft syntax, e.g.
+    ``"iifname eth0 tcp dport 22 accept"``.  It is tokenised with
+    :func:`shlex.split` so shell-style quoting in the expression is honoured.
+
+    Example plan::
+
+        [["nft", "add", "rule", "inet", "filter", "INPUT",
+          "iifname", "eth0", "tcp", "dport", "22", "accept"]]
+    """
+    tokens = shlex.split(rule_expr)
+    return [["nft", "add", "rule", family, table, chain, *tokens]]
+
+
+def plan_nft_delete_rule(
+    family: str, table: str, chain: str, handle: int
+) -> list[list[str]]:
+    """Delete the nftables rule identified by ``handle`` from ``chain``.
+
+    ``handle`` is :attr:`~netgrip.core.model.NftRule.handle` — the stable,
+    kernel-assigned identifier returned by ``nft -j list ruleset``.  No
+    rule-expression text is needed; the handle is the authoritative key.
+
+    Example plan::
+
+        [["nft", "delete", "rule", "inet", "filter", "INPUT", "handle", "4"]]
+    """
+    return [["nft", "delete", "rule", family, table, chain, "handle", str(handle)]]

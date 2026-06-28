@@ -68,14 +68,16 @@ FIXTURE = [
         "ifindex": 4, "ifname": "bond0",
         "flags": ["BROADCAST", "MULTICAST", "MASTER", "UP", "LOWER_UP"], "mtu": 1500,
         "operstate": "UP", "link_type": "ether", "address": "52:54:00:44:55:66",
-        "linkinfo": {"info_kind": "bond", "info_data": {"mode": "802.3ad", "miimon": 100}},
+        "linkinfo": {"info_kind": "bond",
+                    "info_data": {"mode": "802.3ad", "active_slave": "eth1", "miimon": 100}},
         "addr_info": [],
     },
     {
         "ifindex": 5, "ifname": "eth1", "master": "bond0",
         "flags": ["BROADCAST", "MULTICAST", "SLAVE", "UP", "LOWER_UP"], "mtu": 1500,
         "operstate": "UP", "link_type": "ether", "address": "52:54:00:44:55:66",
-        "linkinfo": {"info_slave_kind": "bond"},
+        "linkinfo": {"info_slave_kind": "bond",
+                    "info_slave_data": {"state": "ACTIVE", "mii_status": "UP"}},
         "addr_info": [],
     },
     # A veth pair, both ends in this namespace: vethA reports the peer by
@@ -178,6 +180,37 @@ def test_bond_and_member():
     # A slave has linkinfo with only info_slave_kind: still a physical NIC.
     assert member.kind == "physical"
     assert member.master == "bond0"
+
+
+def test_bond_active_slave_parsed():
+    # active_slave in info_data is surfaced on the bond interface.
+    ifaces = {i.name: i for i in parse_addr_json(FIXTURE)}
+    assert ifaces["bond0"].bond_active_slave == "eth1"
+    # Non-bond interfaces have no active slave.
+    assert ifaces["eth0"].bond_active_slave is None
+
+
+def test_bond_slave_state_parsed():
+    # info_slave_data.state is surfaced on the slave interface.
+    ifaces = {i.name: i for i in parse_addr_json(FIXTURE)}
+    assert ifaces["eth1"].bond_slave_state == "ACTIVE"
+    # A non-bond-slave has no slave state.
+    assert ifaces["eth0"].bond_slave_state is None
+    assert ifaces["bond0"].bond_slave_state is None
+
+
+def test_bond_active_slave_empty_string_is_none():
+    # An empty string for active_slave (no slave yet elected) should be None.
+    payload = [{
+        "ifindex": 1, "ifname": "bond0",
+        "flags": ["BROADCAST", "MULTICAST", "MASTER", "UP", "LOWER_UP"], "mtu": 1500,
+        "operstate": "UP", "link_type": "ether", "address": "52:54:00:aa:bb:cc",
+        "linkinfo": {"info_kind": "bond",
+                     "info_data": {"mode": "active-backup", "active_slave": ""}},
+        "addr_info": [],
+    }]
+    bond = parse_addr_json(payload)[0]
+    assert bond.bond_active_slave is None
 
 
 def test_bridge_vlan_aware_flag():

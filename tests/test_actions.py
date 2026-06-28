@@ -266,3 +266,113 @@ def test_affected_links_collects_dev_name_and_positional_add():
     assert links == {"eth0", "eth1", "eth2", "bond0", "eth0.100"}
     # The gateway address is not mistaken for a link name.
     assert "10.0.0.1" not in links
+
+
+def test_valid_vlan_id():
+    assert actions.valid_vlan_id(1)
+    assert actions.valid_vlan_id(100)
+    assert actions.valid_vlan_id(4094)
+    assert not actions.valid_vlan_id(0)
+    assert not actions.valid_vlan_id(4095)
+    assert not actions.valid_vlan_id(-1)
+    assert not actions.valid_vlan_id(5000)
+
+
+def test_next_bridge_name_skips_taken():
+    assert actions.next_bridge_name(set()) == "br0"
+    assert actions.next_bridge_name({"br0"}) == "br1"
+    assert actions.next_bridge_name({"br0", "br1", "br2"}) == "br3"
+
+
+def test_plan_create_bridge_plain():
+    plan = actions.plan_create_bridge("br0")
+    assert plan[0] == ["ip", "link", "add", "br0", "type", "bridge"]
+    assert plan[1] == ["ip", "link", "set", "dev", "br0", "up"]
+
+
+def test_plan_create_bridge_vlan_aware():
+    plan = actions.plan_create_bridge("br0", vlan_aware=True)
+    assert plan[0] == ["ip", "link", "add", "br0", "type", "bridge", "vlan_filtering", "1"]
+    assert plan[1] == ["ip", "link", "set", "dev", "br0", "up"]
+
+
+def test_plan_set_bridge_vlan_aware_enable():
+    plan = actions.plan_set_bridge_vlan_aware("vmbr0", True)
+    assert plan[0] == ["ip", "link", "set", "dev", "vmbr0", "down"]
+    assert plan[1] == [
+        "ip", "link", "set", "dev", "vmbr0", "type", "bridge", "vlan_filtering", "1"
+    ]
+    assert plan[2] == ["ip", "link", "set", "dev", "vmbr0", "up"]
+
+
+def test_plan_set_bridge_vlan_aware_disable():
+    plan = actions.plan_set_bridge_vlan_aware("vmbr0", False)
+    assert plan[0] == ["ip", "link", "set", "dev", "vmbr0", "down"]
+    assert plan[1][-1] == "0"
+    assert plan[2] == ["ip", "link", "set", "dev", "vmbr0", "up"]
+
+
+def test_plan_bridge_vlan_add_tagged():
+    # Trunk (tagged) VLAN on a bridge port
+    plan = actions.plan_bridge_vlan_add("eth3", 20, tagged=True)
+    assert plan == [["bridge", "vlan", "add", "dev", "eth3", "vid", "20"]]
+
+
+def test_plan_bridge_vlan_add_access_port():
+    # Access port: pvid + untagged
+    plan = actions.plan_bridge_vlan_add("tap0", 20, pvid=True, tagged=False)
+    assert plan == [["bridge", "vlan", "add", "dev", "tap0", "vid", "20", "pvid", "untagged"]]
+
+
+def test_plan_bridge_vlan_add_pvid_and_tagged():
+    # Tagged trunk that also acts as the native VLAN (pvid)
+    plan = actions.plan_bridge_vlan_add("eth3", 10, pvid=True, tagged=True)
+    assert plan == [["bridge", "vlan", "add", "dev", "eth3", "vid", "10", "pvid"]]
+
+
+def test_plan_bridge_vlan_del():
+    plan = actions.plan_bridge_vlan_del("eth3", 20)
+    assert plan == [["bridge", "vlan", "del", "dev", "eth3", "vid", "20"]]
+
+
+def test_plan_create_bridge_affected_links():
+    # The bridge name must be captured as an affected link.
+    plan = actions.plan_create_bridge("br0")
+    assert "br0" in actions.affected_links(plan)
+
+
+def test_plan_bridge_vlan_affected_links():
+    # bridge/vlan cmds use "dev <port>", so affected_links must track the port.
+    plan = actions.plan_bridge_vlan_add("eth3", 20)
+    assert "eth3" in actions.affected_links(plan)
+    plan2 = actions.plan_bridge_vlan_del("eth3", 20)
+    assert "eth3" in actions.affected_links(plan2)
+
+
+def test_add_member_downs_then_enslaves_then_brings_up():
+    # A NIC must be down to change its master; the plan brings it back up after.
+    plan = actions.plan_add_member("bond0", "eth1")
+    assert plan[0] == ["ip", "link", "set", "dev", "eth1", "down"]
+    assert plan[1] == ["ip", "link", "set", "dev", "eth1", "master", "bond0"]
+    assert plan[2] == ["ip", "link", "set", "dev", "eth1", "up"]
+
+
+def test_remove_member_releases_and_brings_up():
+    plan = actions.plan_remove_member("eth1")
+    assert plan[0] == ["ip", "link", "set", "dev", "eth1", "nomaster"]
+    assert plan[1] == ["ip", "link", "set", "dev", "eth1", "up"]
+
+
+def test_set_bond_mode_downs_changes_and_brings_up():
+    # Mode change requires the bond to be down; the plan restores it to up after.
+    plan = actions.plan_set_bond_mode("bond0", "802.3ad")
+    assert plan[0] == ["ip", "link", "set", "dev", "bond0", "down"]
+    assert plan[1] == ["ip", "link", "set", "dev", "bond0", "type", "bond", "mode", "802.3ad"]
+    assert plan[2] == ["ip", "link", "set", "dev", "bond0", "up"]
+
+
+def test_bond_modes_contains_all_standard_modes():
+    # All standard bonding modes must be representable.
+    for mode in ("active-backup", "802.3ad", "balance-rr",
+                 "balance-xor", "broadcast", "balance-tlb", "balance-alb"):
+        assert mode in actions.BOND_MODES, f"{mode!r} missing from BOND_MODES"
