@@ -204,6 +204,59 @@ def plan_remove_member(dev: str) -> list[list[str]]:
     ]
 
 
+def next_bridge_name(existing: set[str]) -> str:
+    n = 0
+    while f"br{n}" in existing:
+        n += 1
+    return f"br{n}"
+
+
+def plan_create_bridge(name: str, vlan_aware: bool = False,
+                       members: list[str] | None = None) -> list[list[str]]:
+    """Create a Linux bridge, optionally with VLAN filtering, and add initial members."""
+    plan: list[list[str]] = [["ip", "link", "add", name, "type", "bridge"]]
+    if vlan_aware:
+        plan.append(["ip", "link", "set", "dev", name, "type", "bridge",
+                     "vlan_filtering", "1"])
+    for member in (members or []):
+        plan.append(["ip", "link", "set", "dev", member, "down"])
+        plan.append(["ip", "link", "set", "dev", member, "master", name])
+        plan.append(["ip", "link", "set", "dev", member, "up"])
+    plan.append(["ip", "link", "set", "dev", name, "up"])
+    return plan
+
+
+def plan_set_bridge_vlan_aware(bridge: str, enable: bool) -> list[list[str]]:
+    """Enable or disable VLAN filtering (vlan-aware mode) on a bridge."""
+    return [["ip", "link", "set", "dev", bridge, "type", "bridge",
+             "vlan_filtering", "1" if enable else "0"]]
+
+
+def plan_bridge_vlan_add(dev: str, vid: int) -> list[list[str]]:
+    """Add a tagged trunk VLAN to a bridge port via `bridge vlan add`."""
+    return [["bridge", "vlan", "add", "dev", dev, "vid", str(vid)]]
+
+
+def plan_bridge_vlan_del(dev: str, vid: int) -> list[list[str]]:
+    """Remove a VLAN from a bridge port."""
+    return [["bridge", "vlan", "del", "dev", dev, "vid", str(vid)]]
+
+
+def plan_bridge_pvid_set(dev: str, vid: int,
+                         old_pvid: int | None = None) -> list[list[str]]:
+    """Set the native (access/untagged-egress) VLAN on a bridge port.
+
+    Removes the old PVID rule first when known, so it does not stack on
+    top of the new one.
+    """
+    plan = []
+    if old_pvid is not None and old_pvid != vid:
+        plan.append(["bridge", "vlan", "del", "dev", dev, "vid", str(old_pvid)])
+    plan.append(["bridge", "vlan", "add", "dev", dev, "vid", str(vid),
+                 "pvid", "untagged"])
+    return plan
+
+
 def plan_set_bond_mode(bond: str, mode: str) -> list[list[str]]:
     # The kernel only allows a mode change while the bond is down.
     return [

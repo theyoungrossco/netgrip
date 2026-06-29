@@ -255,6 +255,77 @@ def test_write_file_preview_ignores_other_commands():
     assert actions.write_file_preview(["sh", "-c", "echo hi"]) is None
 
 
+def test_next_bridge_name_skips_taken():
+    assert actions.next_bridge_name(set()) == "br0"
+    assert actions.next_bridge_name({"br0", "br1"}) == "br2"
+
+
+def test_create_bridge_basic():
+    plan = actions.plan_create_bridge("br0")
+    assert plan[0] == ["ip", "link", "add", "br0", "type", "bridge"]
+    assert plan[-1] == ["ip", "link", "set", "dev", "br0", "up"]
+    # No vlan_filtering step without vlan_aware.
+    assert not any("vlan_filtering" in " ".join(step) for step in plan)
+
+
+def test_create_bridge_vlan_aware():
+    plan = actions.plan_create_bridge("br0", vlan_aware=True)
+    assert plan[0] == ["ip", "link", "add", "br0", "type", "bridge"]
+    vlan_step = plan[1]
+    assert vlan_step == ["ip", "link", "set", "dev", "br0", "type", "bridge",
+                         "vlan_filtering", "1"]
+    assert plan[-1] == ["ip", "link", "set", "dev", "br0", "up"]
+
+
+def test_create_bridge_with_members_downs_before_enslaving():
+    plan = actions.plan_create_bridge("br0", members=["eth1", "eth2"])
+    assert plan[0] == ["ip", "link", "add", "br0", "type", "bridge"]
+    eth1_down = plan.index(["ip", "link", "set", "dev", "eth1", "down"])
+    eth1_master = plan.index(["ip", "link", "set", "dev", "eth1", "master", "br0"])
+    eth1_up = plan.index(["ip", "link", "set", "dev", "eth1", "up"])
+    assert eth1_down < eth1_master < eth1_up
+    assert plan[-1] == ["ip", "link", "set", "dev", "br0", "up"]
+
+
+def test_set_bridge_vlan_aware_enable_disable():
+    on = actions.plan_set_bridge_vlan_aware("br0", True)
+    assert on == [["ip", "link", "set", "dev", "br0", "type", "bridge",
+                   "vlan_filtering", "1"]]
+    off = actions.plan_set_bridge_vlan_aware("br0", False)
+    assert off == [["ip", "link", "set", "dev", "br0", "type", "bridge",
+                    "vlan_filtering", "0"]]
+
+
+def test_bridge_vlan_add_tagged():
+    plan = actions.plan_bridge_vlan_add("eth0", 100)
+    assert plan == [["bridge", "vlan", "add", "dev", "eth0", "vid", "100"]]
+
+
+def test_bridge_vlan_del():
+    plan = actions.plan_bridge_vlan_del("eth0", 100)
+    assert plan == [["bridge", "vlan", "del", "dev", "eth0", "vid", "100"]]
+
+
+def test_bridge_pvid_set_no_old():
+    plan = actions.plan_bridge_pvid_set("eth0", 20)
+    assert plan == [["bridge", "vlan", "add", "dev", "eth0", "vid", "20",
+                     "pvid", "untagged"]]
+
+
+def test_bridge_pvid_set_removes_old_pvid_first():
+    plan = actions.plan_bridge_pvid_set("eth0", 20, old_pvid=1)
+    assert plan[0] == ["bridge", "vlan", "del", "dev", "eth0", "vid", "1"]
+    assert plan[1] == ["bridge", "vlan", "add", "dev", "eth0", "vid", "20",
+                       "pvid", "untagged"]
+
+
+def test_bridge_pvid_set_same_vid_no_del():
+    # When the requested PVID equals the old one, no del step is emitted.
+    plan = actions.plan_bridge_pvid_set("eth0", 20, old_pvid=20)
+    assert len(plan) == 1
+    assert plan[0][0] != "bridge" or "del" not in plan[0]
+
+
 def test_affected_links_collects_dev_name_and_positional_add():
     plan = (
         actions.plan_add_addresses("eth0", ["10.0.0.5/24"])

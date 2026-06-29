@@ -31,6 +31,7 @@ from netgrip.core.actions import (
     BOND_MODES,
     default_vlan_name,
     next_bond_name,
+    next_bridge_name,
     valid_ipaddr,
     valid_link_name,
     valid_mac,
@@ -651,6 +652,69 @@ class BondDialog(QDialog):
         if not self.members:
             self._error.setText("Select at least one member NIC.")
             return
+        self.accept()
+
+
+class BridgeDialog(QDialog):
+    """Name, VLAN-filtering option and member selection for a new bridge."""
+
+    def __init__(self, parent, free_nics: list[str], preselected: list[str],
+                 existing_names: set[str]):
+        super().__init__(parent)
+        self.setWindowTitle("New bridge")
+        self._existing = existing_names
+        self.name = ""
+        self.vlan_aware = False
+        self.members: list[str] = []
+
+        form = QFormLayout(self)
+        self._name_edit = QLineEdit(next_bridge_name(existing_names))
+        form.addRow("Bridge name:", self._name_edit)
+
+        self._vlan_aware_check = QCheckBox("Enable VLAN filtering (vlan-aware)")
+        form.addRow("", self._vlan_aware_check)
+
+        if free_nics:
+            self._member_list: QListWidget | None = QListWidget()
+            for nic in free_nics:
+                item = QListWidgetItem(nic)
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                item.setCheckState(
+                    Qt.CheckState.Checked if nic in preselected else Qt.CheckState.Unchecked
+                )
+                self._member_list.addItem(item)
+            form.addRow("Members:", self._member_list)
+        else:
+            self._member_list = None
+            form.addRow("Members:", QLabel("(no free NICs — add members after creating)"))
+
+        self._error = _error_label()
+        form.addRow(self._error)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self._accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+
+    def _accept(self) -> None:
+        self.name = self._name_edit.text().strip()
+        if not valid_link_name(self.name):
+            self._error.setText(
+                "Interface names are 1-15 characters: letters, digits, '.', '-', '_'."
+            )
+            return
+        if self.name in self._existing:
+            self._error.setText(f"'{self.name}' already exists.")
+            return
+        self.vlan_aware = self._vlan_aware_check.isChecked()
+        if self._member_list is not None:
+            self.members = [
+                self._member_list.item(i).text()
+                for i in range(self._member_list.count())
+                if self._member_list.item(i).checkState() == Qt.CheckState.Checked
+            ]
         self.accept()
 
 

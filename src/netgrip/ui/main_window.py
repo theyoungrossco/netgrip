@@ -67,6 +67,7 @@ from netgrip.ui.dialogs import (
     CONFIRM_CANCEL,
     CONFIRM_TRY,
     BondDialog,
+    BridgeDialog,
     DraftVlanDialog,
     IpConfigDialog,
     IpGroupDialog,
@@ -1151,6 +1152,42 @@ class MainWindow(QMainWindow):
                 actions.plan_create_bond(dialog.name, dialog.mode, dialog.members),
             )
 
+    def _new_bridge_dialog(self, preselected: list[str]) -> None:
+        if not self.state:
+            return
+        free = [i.name for i in self.state.free_nics()]
+        dialog = BridgeDialog(self, free, preselected, self.state.link_names())
+        if dialog.exec():
+            self._apply(
+                f"Create bridge {dialog.name}",
+                actions.plan_create_bridge(dialog.name, dialog.vlan_aware, dialog.members),
+            )
+
+    def _add_trunk_vlan_dialog(self, port: str) -> None:
+        """Add a tagged trunk VLAN to a bridge port via `bridge vlan add`."""
+        vid, ok = QInputDialog.getInt(
+            self, f"Add trunk VLAN to {port}", "VLAN id (1–4094):", 1, 1, 4094
+        )
+        if ok:
+            self._apply(
+                f"Add trunk VLAN {vid} to {port}",
+                actions.plan_bridge_vlan_add(port, vid),
+                revert=actions.plan_bridge_vlan_del(port, vid),
+            )
+
+    def _set_pvid_dialog(self, port: str, old_pvid: int | None) -> None:
+        """Set the native (access/PVID) VLAN on a bridge port."""
+        vid, ok = QInputDialog.getInt(
+            self, f"Access VLAN on {port}", "Native VLAN id (1–4094):",
+            old_pvid or 1, 1, 4094
+        )
+        if ok and vid != old_pvid:
+            self._apply(
+                f"Set access VLAN {vid} on {port}",
+                actions.plan_bridge_pvid_set(port, vid, old_pvid),
+                revert=actions.plan_bridge_pvid_set(port, old_pvid or 1, vid),
+            )
+
     # ------------------------------------------------------------------ #
     # context menus
     # ------------------------------------------------------------------ #
@@ -1266,16 +1303,30 @@ class MainWindow(QMainWindow):
         self._add_common_iface_items(menu, iface)
         menu.addSeparator()
         if iface.master:
+            master = self.state.get(iface.master) if self.state else None
             menu.addAction(
                 f"Remove from {iface.master}",
                 partial(self._apply, f"Remove {iface.name} from {iface.master}",
                         actions.plan_remove_member(iface.name),
                         revert=actions.plan_add_member(iface.master, iface.name)),
             )
+            if master and master.kind == "bridge" and master.bridge_vlan_aware:
+                menu.addAction(
+                    "Add trunk VLAN…",
+                    partial(self._add_trunk_vlan_dialog, iface.name),
+                )
+                menu.addAction(
+                    "Set access VLAN (PVID)…",
+                    partial(self._set_pvid_dialog, iface.name, iface.pvid),
+                )
         elif iface.kind == "physical":
             menu.addAction(
                 "Create bond with this NIC…",
                 partial(self._new_bond_dialog, [iface.name]),
+            )
+            menu.addAction(
+                "Create bridge with this NIC…",
+                partial(self._new_bridge_dialog, [iface.name]),
             )
 
     def _fill_group_menu(self, menu: QMenu, iface: Interface) -> None:
@@ -1293,6 +1344,35 @@ class MainWindow(QMainWindow):
                 )
                 action.setCheckable(True)
                 action.setChecked(value == iface.bond_mode)
+        elif iface.kind == "bridge":
+            if iface.bridge_vlan_aware:
+                menu.addAction(
+                    "Disable VLAN filtering",
+                    partial(self._apply, f"Disable VLAN filtering on {iface.name}",
+                            actions.plan_set_bridge_vlan_aware(iface.name, False),
+                            revert=actions.plan_set_bridge_vlan_aware(iface.name, True)),
+                )
+                members = self.state.members_of(iface.name) if self.state else []
+                if members:
+                    trunk_menu = menu.addMenu("Add trunk VLAN on port")
+                    for member in members:
+                        trunk_menu.addAction(
+                            member.name,
+                            partial(self._add_trunk_vlan_dialog, member.name),
+                        )
+                    pvid_menu = menu.addMenu("Set access VLAN (PVID) on port")
+                    for member in members:
+                        pvid_menu.addAction(
+                            member.name,
+                            partial(self._set_pvid_dialog, member.name, member.pvid),
+                        )
+            else:
+                menu.addAction(
+                    "Enable VLAN filtering",
+                    partial(self._apply, f"Enable VLAN filtering on {iface.name}",
+                            actions.plan_set_bridge_vlan_aware(iface.name, True),
+                            revert=actions.plan_set_bridge_vlan_aware(iface.name, False)),
+                )
         add_menu = menu.addMenu("Add member")
         free = self.state.free_nics()
         add_menu.setEnabled(bool(free))
@@ -1424,6 +1504,9 @@ class MainWindow(QMainWindow):
         )
         menu.addAction(
             "New VLAN (draft)…", partial(self._new_vlan_draft_dialog, scene_pos)
+        )
+        menu.addAction(
+            "New bridge…", partial(self._new_bridge_dialog, [])
         )
         menu.addSeparator()
         menu.addAction("Refresh", self.refresh)
