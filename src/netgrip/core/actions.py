@@ -349,6 +349,47 @@ def affected_links(plan: list[list[str]]) -> set[str]:
     return links
 
 
+# nftables rule edits ─────────────────────────────────────────────────────────
+
+_NFT_ID_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]{0,63}$")
+NFT_FAMILIES = frozenset({"ip", "ip6", "inet", "arp", "bridge", "netdev"})
+
+
+def valid_nft_identifier(name: str) -> bool:
+    """A valid nft table or chain name: letter/underscore start, ≤64 chars."""
+    return bool(_NFT_ID_RE.match(name))
+
+
+def plan_nft_add_rule(
+    family: str, table: str, chain: str, rule_expr: str
+) -> list[list[str]]:
+    """Append a rule to ``chain`` using the nft CLI expression string ``rule_expr``.
+
+    ``rule_expr`` is the nft syntax fragment that follows the chain name, e.g.
+    ``"iifname eth0 accept"`` or ``"tcp dport 22 accept"``.  It is split by the
+    shell so individual tokens arrive as separate argv elements — no shell
+    injection risk from the fixed prefix, only from a hostile ``rule_expr``
+    that a caller must validate before passing here."""
+    return [["nft", "add", "rule", family, table, chain, *shlex.split(rule_expr)]]
+
+
+def plan_nft_delete_rule(
+    family: str, table: str, chain: str, handle: int
+) -> list[list[str]]:
+    """Delete the rule identified by ``handle`` from ``chain``.
+
+    Handles are stable within one kernel session (they don't compact on
+    deletion) and are the only safe way to target a specific rule — deleting
+    by position would be racy if another process edits the ruleset between
+    the read and the delete."""
+    return [["nft", "delete", "rule", family, table, chain, "handle", str(handle)]]
+
+
+def plan_nft_flush_chain(family: str, table: str, chain: str) -> list[list[str]]:
+    """Remove all rules from ``chain`` without deleting the chain itself."""
+    return [["nft", "flush", "chain", family, table, chain]]
+
+
 def plan_install_ifupdown2() -> list[list[str]]:
     """Install ifupdown2 on a Debian/Proxmox host so it gains a persistence
     backend NetGrip can Save through.

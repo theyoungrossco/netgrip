@@ -35,6 +35,7 @@ from netgrip.core.demo import (
     DEMO_DNS,
     DEMO_DNS_SEARCH,
     demo_docker,
+    demo_firewall,
     demo_interfaces,
 )
 from netgrip.core.model import (
@@ -42,12 +43,20 @@ from netgrip.core.model import (
     Address,
     Container,
     DockerNetwork,
+    FirewallState,
     Gateway,
     HostState,
     Interface,
     ip_family,
 )
-from netgrip.core.probe import apply_docker, apply_link_dns, probe, probe_dns, probe_docker
+from netgrip.core.probe import (
+    apply_docker,
+    apply_link_dns,
+    probe,
+    probe_dns,
+    probe_docker,
+    probe_firewall,
+)
 from netgrip.core.runner import (
     IS_WINDOWS,
     DemoRunner,
@@ -68,6 +77,7 @@ from netgrip.ui.dialogs import (
     CONFIRM_TRY,
     BondDialog,
     DraftVlanDialog,
+    FirewallDialog,
     IpConfigDialog,
     IpGroupDialog,
     LinkPropertiesDialog,
@@ -515,7 +525,8 @@ class MainWindow(QMainWindow):
             apply_docker(interfaces, docker_networks)  # tag docker0 / br-… bridges
             self._set_state(interfaces, DEMO_DNS, DEMO_DNS_SEARCH,
                             can_edit_dns=False, backend=DEMO_BACKEND,
-                            docker_networks=docker_networks, containers=containers)
+                            docker_networks=docker_networks, containers=containers,
+                            firewall=demo_firewall())
             return
         self._set_busy(True, f"Reading interfaces on {runner.label}…")
 
@@ -526,7 +537,11 @@ class MainWindow(QMainWindow):
             docker_networks, containers = probe_docker(runner)  # best-effort
             apply_docker(interfaces, docker_networks)  # tag bridges with their net
             backend = detect_backend(runner)  # which subsystem owns persistent config
-            return interfaces, servers, search, can_edit, backend, docker_networks, containers
+            firewall = probe_firewall(runner)  # best-effort; absent nft → available=False
+            return (
+                interfaces, servers, search, can_edit,
+                backend, docker_networks, containers, firewall,
+            )
 
         run_in_background(
             work,
@@ -608,13 +623,15 @@ class MainWindow(QMainWindow):
                    dns_search: list[str] | None = None, can_edit_dns: bool = False,
                    backend: Backend | None = None,
                    docker_networks: list[DockerNetwork] | None = None,
-                   containers: list[Container] | None = None) -> None:
+                   containers: list[Container] | None = None,
+                   firewall: FirewallState | None = None) -> None:
         self.state = HostState(
             self.runner.label, interfaces,
             list(dns or []), list(dns_search or []), can_edit_dns,
             backend=backend,
             docker_networks=list(docker_networks or []),
             containers=list(containers or []),
+            firewall=firewall if firewall is not None else FirewallState(available=False),
         )
         # Re-attach any unsaved "→ DHCP" intents, dropping ones whose link or
         # static address is gone (already DHCP, or removed), so a stale pending
@@ -1232,6 +1249,12 @@ class MainWindow(QMainWindow):
     def _fill_dns_menu(self, menu: QMenu) -> None:
         menu.addAction("Edit manual resolvers…", self._manual_dns_dialog)
 
+    def _firewall_dialog(self, iface: Interface) -> None:
+        if not self.state:
+            return
+        dlg = FirewallDialog(iface.name, self.state.firewall, self._apply, parent=self)
+        dlg.exec()
+
     def _add_common_iface_items(self, menu: QMenu, iface: Interface) -> None:
         # A "config" is the whole family: address (static or DHCP/RA), gateway,
         # DNS and search — the rich IpGroup dialog. Adding a bare extra address
@@ -1246,6 +1269,7 @@ class MainWindow(QMainWindow):
             menu.addAction("Add VLAN…", partial(self._add_vlan_dialog, iface.name))
         if iface.kind != "loopback":
             menu.addAction("Properties…", partial(self._link_properties_dialog, iface))
+        menu.addAction("Firewall rules…", partial(self._firewall_dialog, iface))
         menu.addSeparator()
         if iface.is_up:
             menu.addAction(

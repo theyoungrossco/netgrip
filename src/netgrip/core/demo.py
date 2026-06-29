@@ -11,8 +11,12 @@ from netgrip.core.model import (
     Address,
     Container,
     DockerNetwork,
+    FirewallState,
     Gateway,
     Interface,
+    NftChain,
+    NftRule,
+    NftTable,
     PortMapping,
 )
 
@@ -146,6 +150,84 @@ def demo_interfaces() -> list[Interface]:
             mac="02:42:9b:11:22:12", mtu=1500, master="br-abc123def456",
         ),
     ]
+
+
+def demo_firewall() -> FirewallState:
+    """Representative nftables ruleset for the built-in demo host.
+
+    Models a typical server setup: inet filter table with INPUT/FORWARD/OUTPUT
+    base chains, and a nat table for masquerade on the uplink (eth0).  Rules
+    reference eth0 and bond0 so the per-interface firewall panel has something
+    to show on those boxes."""
+    filter_input = NftChain(
+        name="INPUT", family="inet", table="filter", handle=1,
+        chain_type="filter", hook="input", prio=0, policy="drop",
+        rules=[
+            NftRule(
+                handle=1, family="inet", table="filter", chain="INPUT",
+                ifaces=["lo"],
+                expr_summary="iifname == lo accept",
+            ),
+            NftRule(
+                handle=2, family="inet", table="filter", chain="INPUT",
+                ifaces=[],
+                expr_summary="ct state {established, related} accept",
+            ),
+            NftRule(
+                handle=3, family="inet", table="filter", chain="INPUT",
+                ifaces=["eth0"],
+                comment="ssh from uplink",
+                expr_summary="iifname == eth0 tcp.dport == 22 accept",
+            ),
+            NftRule(
+                handle=4, family="inet", table="filter", chain="INPUT",
+                ifaces=["bond0"],
+                expr_summary="iifname == bond0 accept",
+            ),
+        ],
+    )
+    filter_forward = NftChain(
+        name="FORWARD", family="inet", table="filter", handle=2,
+        chain_type="filter", hook="forward", prio=0, policy="drop",
+        rules=[
+            NftRule(
+                handle=5, family="inet", table="filter", chain="FORWARD",
+                ifaces=["eth0"],
+                expr_summary="oifname == eth0 ct state {established, related} accept",
+            ),
+            NftRule(
+                handle=6, family="inet", table="filter", chain="FORWARD",
+                ifaces=["bond0", "eth0"],
+                expr_summary="iifname == bond0 oifname == eth0 accept",
+            ),
+        ],
+    )
+    filter_output = NftChain(
+        name="OUTPUT", family="inet", table="filter", handle=3,
+        chain_type="filter", hook="output", prio=0, policy="accept",
+    )
+    filter_table = NftTable(
+        name="filter", family="inet", handle=1,
+        chains=[filter_input, filter_forward, filter_output],
+    )
+
+    nat_postrouting = NftChain(
+        name="POSTROUTING", family="ip", table="nat", handle=1,
+        chain_type="nat", hook="postrouting", prio=100, policy="accept",
+        rules=[
+            NftRule(
+                handle=7, family="ip", table="nat", chain="POSTROUTING",
+                ifaces=["eth0"],
+                expr_summary="oifname == eth0 masquerade",
+            ),
+        ],
+    )
+    nat_table = NftTable(
+        name="nat", family="ip", handle=2,
+        chains=[nat_postrouting],
+    )
+
+    return FirewallState(tables=[filter_table, nat_table], available=True)
 
 
 # Docker networks and the running containers on them, as `docker network

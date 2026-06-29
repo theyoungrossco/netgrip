@@ -231,6 +231,81 @@ class Interface:
 
 
 @dataclass
+class NftRule:
+    """One nftables rule, as read from `nft -j list ruleset`."""
+
+    handle: int
+    family: str
+    table: str
+    chain: str
+    comment: str = ""
+    # Interface names referenced by iifname/oifname match expressions.
+    ifaces: list[str] = field(default_factory=list)
+    # Compact human-readable rendering of the rule expression.
+    expr_summary: str = ""
+
+
+@dataclass
+class NftChain:
+    """One nftables chain (base or regular)."""
+
+    name: str
+    family: str
+    table: str
+    handle: int
+    # Present only on base chains (hooked into the netfilter framework).
+    chain_type: str | None = None   # filter | nat | route
+    hook: str | None = None         # input | output | forward | prerouting | postrouting
+    prio: int | None = None
+    policy: str | None = None       # accept | drop
+    rules: list[NftRule] = field(default_factory=list)
+
+    @property
+    def is_base_chain(self) -> bool:
+        return self.hook is not None
+
+
+@dataclass
+class NftTable:
+    """One nftables table."""
+
+    name: str
+    family: str
+    handle: int
+    chains: list[NftChain] = field(default_factory=list)
+
+
+@dataclass
+class FirewallState:
+    """nftables ruleset snapshot, produced by probe_firewall().
+
+    ``available`` is False when nft is absent or returned no parseable output;
+    the canvas shows a "firewall not available" placeholder in that case."""
+
+    tables: list[NftTable] = field(default_factory=list)
+    available: bool = True
+
+    def rules_for_iface(self, ifname: str) -> list[NftRule]:
+        """All rules that reference ``ifname`` via iifname/oifname."""
+        return [
+            rule
+            for table in self.tables
+            for chain in table.chains
+            for rule in chain.rules
+            if ifname in rule.ifaces
+        ]
+
+    def chains_for_iface(self, ifname: str) -> list[tuple[NftTable, NftChain]]:
+        """(table, chain) pairs that contain at least one rule referencing ``ifname``."""
+        return [
+            (table, chain)
+            for table in self.tables
+            for chain in table.chains
+            if any(ifname in r.ifaces for r in chain.rules)
+        ]
+
+
+@dataclass
 class HostState:
     """Snapshot of all interfaces on one host."""
 
@@ -246,6 +321,8 @@ class HostState:
     # hang off those networks. See probe_docker / core/model PortMapping.
     docker_networks: list[DockerNetwork] = field(default_factory=list)
     containers: list[Container] = field(default_factory=list)
+    # Firewall view (best-effort; FirewallState(available=False) when nft absent).
+    firewall: FirewallState = field(default_factory=FirewallState)
     # (interface, family) pairs the user has switched to DHCP but not yet saved.
     # UI-only intent (set by main_window, redrawn each probe): the family still
     # holds its static address at runtime until Save writes `dhcp` through the

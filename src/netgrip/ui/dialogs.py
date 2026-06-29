@@ -36,7 +36,7 @@ from netgrip.core.actions import (
     valid_mac,
     write_file_preview,
 )
-from netgrip.core.model import Interface, ip_family
+from netgrip.core.model import FirewallState, Interface, NftRule, ip_family
 from netgrip.ui import theme
 
 # The choice a user makes in the command-confirmation dialog. Apply changes the
@@ -789,4 +789,137 @@ class TryCountdownDialog(QDialog):
     def _finish(self, *, kept: bool) -> None:
         self._timer.stop()
         self.kept = kept
+        self.accept()
+
+
+class FirewallDialog(QDialog):
+    """Read-only view of nftables rules that reference one interface.
+
+    Groups rules by table → chain, shows the handle, expression summary, and
+    optional comment.  Offers plan-gated add/delete via the caller's ``apply``
+    callback so no action happens without user confirmation.
+    """
+
+    def __init__(
+        self,
+        iface_name: str,
+        firewall: FirewallState,
+        apply_cb,   # callable(title, plan) — same as MainWindow._apply
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(f"Firewall — {iface_name}")
+        self.resize(640, 400)
+        self._iface = iface_name
+        self._firewall = firewall
+        self._apply_cb = apply_cb
+
+        root = QVBoxLayout(self)
+
+        if not firewall.available:
+            root.addWidget(_hint_label("nftables not available on this host (nft not found)."))
+            root.addWidget(QDialogButtonBox(QDialogButtonBox.StandardButton.Close, self))
+            self.findChild(QDialogButtonBox).rejected.connect(self.reject)
+            return
+
+        rules = firewall.rules_for_iface(iface_name)
+        if not rules:
+            root.addWidget(_hint_label(
+                f"No nftables rules reference {iface_name}.\n"
+                "Use 'Add rule…' to create one, or rules may reference this interface "
+                "by a wildcard/prefix match (not shown here)."
+            ))
+        else:
+            self._list = QListWidget()
+            self._list.setFont(QFont("Monospace"))
+            self._populate(rules)
+            root.addWidget(self._list)
+
+        btn_bar = QHBoxLayout()
+        add_btn = QPushButton("Add rule…")
+        add_btn.clicked.connect(self._add_rule)
+        btn_bar.addWidget(add_btn)
+        btn_bar.addStretch()
+        if rules:
+            del_btn = QPushButton("Delete selected rule")
+            del_btn.clicked.connect(self._delete_rule)
+            btn_bar.addWidget(del_btn)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        btn_bar.addWidget(close_btn)
+        root.addLayout(btn_bar)
+
+    def _populate(self, rules: list[NftRule]) -> None:
+        for rule in rules:
+            prefix = f"[{rule.family}/{rule.table}/{rule.chain} h={rule.handle}]"
+            label = f"{prefix}  {rule.expr_summary}"
+            if rule.comment:
+                label += f"  # {rule.comment}"
+            item = QListWidgetItem(label)
+            item.setData(Qt.ItemDataRole.UserRole, rule)
+            self._list.addItem(item)
+
+    def _selected_rule(self) -> NftRule | None:
+        if not hasattr(self, "_list"):
+            return None
+        item = self._list.currentItem()
+        return item.data(Qt.ItemDataRole.UserRole) if item else None
+
+    def _add_rule(self) -> None:
+        from netgrip.core import actions as _actions
+
+        chains_for_iface = self._firewall.chains_for_iface(self._iface)
+        if not chains_for_iface:
+            _hint_label("No chains reference this interface; create a chain first with nft.")
+            return
+
+        # Simple two-field dialog: pick chain, enter expression
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Add nft rule")
+        vbox = QVBoxLayout(dlg)
+        form = QFormLayout()
+
+        chain_combo = QComboBox()
+        for table, chain in chains_for_iface:
+            chain_combo.addItem(
+                f"{chain.family}/{table.name}/{chain.name}",
+                (chain.family, table.name, chain.name),
+            )
+        form.addRow("Chain:", chain_combo)
+
+        expr_edit = QLineEdit()
+        expr_edit.setPlaceholderText(f"e.g. iifname {self._iface} tcp dport 443 accept")
+        form.addRow("Expression:", expr_edit)
+
+        err = _error_label()
+        vbox.addLayout(form)
+        vbox.addWidget(err)
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        vbox.addWidget(btns)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        expr = expr_edit.text().strip()
+        if not expr:
+            return
+        family, table, chain = chain_combo.currentData()
+        plan = _actions.plan_nft_add_rule(family, table, chain, expr)
+        self._apply_cb(f"Add nft rule to {chain}", plan)
+        self.accept()
+
+    def _delete_rule(self) -> None:
+        from netgrip.core import actions as _actions
+
+        rule = self._selected_rule()
+        if rule is None:
+            return
+        plan = _actions.plan_nft_delete_rule(rule.family, rule.table, rule.chain, rule.handle)
+        summary = rule.expr_summary or f"handle {rule.handle}"
+        self._apply_cb(f"Delete nft rule: {summary}", plan)
         self.accept()

@@ -9,8 +9,12 @@ from netgrip.core.model import (
     Address,
     Container,
     DockerNetwork,
+    FirewallState,
     Gateway,
     Interface,
+    NftChain,
+    NftRule,
+    NftTable,
     PortMapping,
 )
 from netgrip.core.runner import Runner
@@ -522,3 +526,175 @@ def _operstate(item: dict) -> str:
         # Loopback and some virtual devices report UNKNOWN; fall back to flags.
         return "up" if "UP" in (item.get("flags") or []) else "down"
     return state if state in ("up", "down") else "down"
+
+
+# nftables probe ──────────────────────────────────────────────────────────────
+
+# `nft -j list ruleset` emits JSON; available since nft 0.9.3.  We run it
+# best-effort (requires root or CAP_NET_ADMIN): absent nft, empty ruleset, or
+# any parse error yields FirewallState(available=False).
+NFT_COMMAND = ["nft", "-j", "list", "ruleset"]
+
+
+def probe_firewall(runner: Runner) -> FirewallState:
+    """Read the nftables ruleset from the host.
+
+    Requires privilege (same sudo/ssh batch as the rest of the probe on
+    privileged runners). Returns ``FirewallState(available=False)`` when nft
+    is absent, the ruleset is empty, or any error occurs — never raises."""
+    try:
+        out = runner.run(NFT_COMMAND)
+        payload = json.loads(out)
+    except (RuntimeError, ValueError, json.JSONDecodeError):
+        return FirewallState(available=False)
+    return parse_nft_json(payload)
+
+
+def _nft_extract_ifaces(expr_list: list) -> list[str]:
+    """Interface names referenced by iifname/oifname in an nft rule expression."""
+    ifaces: list[str] = []
+    for item in expr_list:
+        if not isinstance(item, dict):
+            continue
+        match_expr = item.get("match")
+        if not isinstance(match_expr, dict):
+            continue
+        left = match_expr.get("left")
+        if not isinstance(left, dict):
+            continue
+        meta = left.get("meta")
+        if not isinstance(meta, dict) or meta.get("key") not in ("iifname", "oifname"):
+            continue
+        right = match_expr.get("right")
+        if isinstance(right, str):
+            ifaces.append(right)
+        elif isinstance(right, dict):
+            for entry in right.get("set") or []:
+                if isinstance(entry, str):
+                    ifaces.append(entry)
+    return ifaces
+
+
+def _nft_summarise_expr(expr_list: list) -> str:
+    """Compact human-readable rendering of an nft rule expression list."""
+    parts: list[str] = []
+    for item in expr_list:
+        if not isinstance(item, dict):
+            continue
+        key = next(iter(item), None)
+        if key in ("accept", "drop", "return", "continue", "masquerade",
+                   "redirect", "log", "reject"):
+            parts.append(key)
+        elif key == "jump" and isinstance(item[key], dict):
+            parts.append(f"jump {item[key].get('target', '?')}")
+        elif key == "goto" and isinstance(item[key], dict):
+            parts.append(f"goto {item[key].get('target', '?')}")
+        elif key == "dnat" and isinstance(item[key], dict):
+            addr = item[key].get("addr", "?")
+            parts.append(f"dnat to {addr}")
+        elif key == "snat" and isinstance(item[key], dict):
+            addr = item[key].get("addr", "?")
+            parts.append(f"snat to {addr}")
+        elif key == "counter":
+            pass  # skip counters; they add noise without meaning in summaries
+        elif key == "match" and isinstance(item[key], dict):
+            m = item[key]
+            op = m.get("op", "==")
+            left = m.get("left", {})
+            right = m.get("right")
+            # Render left operand
+            if isinstance(left, dict):
+                if "meta" in left and isinstance(left["meta"], dict):
+                    l_str = left["meta"].get("key", "?")
+                elif "payload" in left and isinstance(left["payload"], dict):
+                    p = left["payload"]
+                    l_str = f"{p.get('protocol', '?')}.{p.get('field', '?')}"
+                elif "ct" in left and isinstance(left["ct"], dict):
+                    l_str = f"ct {left['ct'].get('key', '?')}"
+                else:
+                    l_str = next(iter(left), "?")
+            else:
+                l_str = str(left)
+            # Render right operand
+            if isinstance(right, str):
+                r_str = right
+            elif isinstance(right, int):
+                r_str = str(right)
+            elif isinstance(right, dict) and "set" in right:
+                r_str = "{" + ", ".join(str(x) for x in right["set"]) + "}"
+            elif isinstance(right, dict) and "range" in right:
+                rng = right["range"]
+                r_str = (
+                    f"{rng[0]}-{rng[1]}" if isinstance(rng, list) and len(rng) == 2
+                    else str(rng)
+                )
+            else:
+                r_str = "?"
+            parts.append(f"{l_str} {op} {r_str}")
+    return " ".join(parts) if parts else "(empty)"
+
+
+def parse_nft_json(payload: dict) -> FirewallState:
+    """Parse ``nft -j list ruleset`` JSON into a :class:`FirewallState`.
+
+    The output is a flat list of objects under ``"nftables"``, each with exactly
+    one key: ``metainfo``, ``table``, ``chain``, or ``rule``.  We walk it in
+    order so chains always follow their table and rules always follow their chain.
+    """
+    tables: dict[tuple[str, str], NftTable] = {}   # (family, name) → NftTable
+    chains: dict[tuple[str, str, str], NftChain] = {}  # (family, table, name) → NftChain
+
+    for item in payload.get("nftables") or []:
+        if not isinstance(item, dict):
+            continue
+
+        if "table" in item:
+            t = item["table"]
+            key: tuple[str, str] = (t.get("family", ""), t.get("name", ""))
+            tables[key] = NftTable(
+                name=t.get("name", ""),
+                family=t.get("family", ""),
+                handle=t.get("handle", 0),
+            )
+
+        elif "chain" in item:
+            c = item["chain"]
+            tkey: tuple[str, str] = (c.get("family", ""), c.get("table", ""))
+            ckey: tuple[str, str, str] = (
+                c.get("family", ""), c.get("table", ""), c.get("name", "")
+            )
+            chain = NftChain(
+                name=c.get("name", ""),
+                family=c.get("family", ""),
+                table=c.get("table", ""),
+                handle=c.get("handle", 0),
+                chain_type=c.get("type"),
+                hook=c.get("hook"),
+                prio=c.get("prio"),
+                policy=c.get("policy"),
+            )
+            chains[ckey] = chain
+            tbl = tables.get(tkey)
+            if tbl is not None:
+                tbl.chains.append(chain)
+
+        elif "rule" in item:
+            r = item["rule"]
+            rkey: tuple[str, str, str] = (
+                r.get("family", ""), r.get("table", ""), r.get("chain", "")
+            )
+            expr_list = r.get("expr") or []
+            rule = NftRule(
+                handle=r.get("handle", 0),
+                family=r.get("family", ""),
+                table=r.get("table", ""),
+                chain=r.get("chain", ""),
+                comment=r.get("comment", ""),
+                ifaces=_nft_extract_ifaces(expr_list),
+                expr_summary=_nft_summarise_expr(expr_list),
+            )
+            chain_obj = chains.get(rkey)
+            if chain_obj is not None:
+                chain_obj.rules.append(rule)
+
+    return FirewallState(tables=list(tables.values()), available=True)
