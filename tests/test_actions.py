@@ -113,6 +113,32 @@ def test_create_bond_downs_members_before_enslaving():
     assert plan[-1] == ["ip", "link", "set", "dev", "bond0", "up"]
 
 
+def test_add_member_downs_then_enslaves_then_brings_up():
+    plan = actions.plan_add_member("bond0", "eth2")
+    assert plan == [
+        ["ip", "link", "set", "dev", "eth2", "down"],
+        ["ip", "link", "set", "dev", "eth2", "master", "bond0"],
+        ["ip", "link", "set", "dev", "eth2", "up"],
+    ]
+
+
+def test_remove_member_clears_master_and_brings_up():
+    plan = actions.plan_remove_member("eth2")
+    assert plan == [
+        ["ip", "link", "set", "dev", "eth2", "nomaster"],
+        ["ip", "link", "set", "dev", "eth2", "up"],
+    ]
+
+
+def test_set_bond_mode_downs_bond_changes_mode_brings_up():
+    plan = actions.plan_set_bond_mode("bond0", "balance-rr")
+    assert plan == [
+        ["ip", "link", "set", "dev", "bond0", "down"],
+        ["ip", "link", "set", "dev", "bond0", "type", "bond", "mode", "balance-rr"],
+        ["ip", "link", "set", "dev", "bond0", "up"],
+    ]
+
+
 def test_move_vlan_recreates_with_addresses_and_conventional_rename():
     vlan = Interface(
         name="eth0.100", kind="vlan", state="up", vlan_id=100, vlan_parent="eth0",

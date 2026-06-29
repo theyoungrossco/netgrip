@@ -261,6 +261,8 @@ class GroupNode(BaseNode):
                 lines.append(iface.alias)
         if iface.kind == "bond":
             lines.append(BOND_MODES.get(iface.bond_mode or "", iface.bond_mode or "bond"))
+            if iface.active_slave:
+                lines.append(f"active: {iface.active_slave}")
         elif iface.docker_network:
             # The docker network is the title when there's no alias; name it
             # here only when the alias took the title.

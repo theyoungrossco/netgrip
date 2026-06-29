@@ -175,9 +175,27 @@ def test_bond_and_member():
     assert bond.kind == "bond"
     assert bond.bond_mode == "802.3ad"
     assert bond.is_group
+    assert bond.active_slave is None  # 802.3ad has no single active slave
     # A slave has linkinfo with only info_slave_kind: still a physical NIC.
     assert member.kind == "physical"
     assert member.master == "bond0"
+
+
+def test_bond_active_slave_parsed():
+    payload = [{
+        "ifindex": 10, "ifname": "bond1",
+        "flags": ["BROADCAST", "MULTICAST", "MASTER", "UP", "LOWER_UP"], "mtu": 1500,
+        "operstate": "UP", "link_type": "ether", "address": "52:54:00:aa:bb:cc",
+        "linkinfo": {
+            "info_kind": "bond",
+            "info_data": {"mode": "active-backup", "miimon": 100, "active_slave": "eth2"},
+        },
+        "addr_info": [],
+    }]
+    bond = parse_addr_json(payload)[0]
+    assert bond.kind == "bond"
+    assert bond.bond_mode == "active-backup"
+    assert bond.active_slave == "eth2"
 
 
 def test_bridge_vlan_aware_flag():

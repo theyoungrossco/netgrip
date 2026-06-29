@@ -144,6 +144,7 @@ class Interface:
     vlan_id: int | None = None
     vlan_parent: str | None = None
     bond_mode: str | None = None
+    active_slave: str | None = None  # currently-active slave name (active-backup only)
     # The other end of a veth pair, when both ends live in this namespace (the
     # Proxmox firewall fwln/fwpr case). A container's far end sits in its own
     # netns and is not visible here, so this stays None for those.

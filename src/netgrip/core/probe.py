@@ -473,6 +473,7 @@ def parse_addr_json(payload: list[dict]) -> list[Interface]:
             vlan_id=info_data.get("id") if kind == "vlan" else None,
             vlan_parent=item.get("link") if kind == "vlan" else None,
             bond_mode=info_data.get("mode") if kind == "bond" else None,
+            active_slave=info_data.get("active_slave") if kind == "bond" else None,
             bridge_vlan_aware=bool(info_data.get("vlan_filtering")) if kind == "bridge" else False,
         )
         if kind == "veth":
